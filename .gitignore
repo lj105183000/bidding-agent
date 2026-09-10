@@ -1,0 +1,37 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---------- 环境与密钥（严禁入库） ----------
+.env
+.env.*
+!.env.example
+
+# ---------- 数据（大部分不入库） ----------
+data/
+!data/.gitkeep
+data/vocab.json
+
+# ---------- Node / 前端 ----------
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# ---------- IDE / 系统 ----------
+.idea/
+.vscode/
+*.iml
+Thumbs.db
+.DS_Store
+
+# ---------- 日志与临时 ----------
+*.log
+*.tmp
+~$*
+
+# ---------- 大文件 / 安装包（禁止入库） ----------
+招投标采购Agent项目讲解/99_软件下载/
