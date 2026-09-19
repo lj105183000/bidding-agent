@@ -33,6 +33,10 @@ dependencies = [
 [dependency-groups]
 dev = ["pytest>=9.1.1"]
 
+[tool.pytest.ini_options]
+# 让测试可以从仓库根导入 src.* 包
+pythonpath = ["."]
+
 [tool.uv]
 # 骨架阶段先作为非打包项目运行；模块落地后如需要可改为打包布局
 package = false
