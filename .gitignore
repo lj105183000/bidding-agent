@@ -1,4 +1,4 @@
-# Logs
+# ---------- Logs ----------
 logs
 *.log
 npm-debug.log*
@@ -7,18 +7,52 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# ---------- Node / 前端 ----------
 node_modules
 dist
 dist-ssr
 *.local
+.next/
+out/
+*.tsbuildinfo
 
-# Editor directories and files
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---------- 本地 uv 镜像配置 ----------
+uv.toml
+
+# ---------- 环境与密钥（严禁入库） ----------
+.env
+.env.*
+!.env.example
+
+# ---------- 数据 ----------
+data/
+!data/.gitkeep
+data/vocab.json
+
+# ---------- IDE / 系统 ----------
 .vscode/*
 !.vscode/extensions.json
-.idea
+.idea/
+*.iml
+Thumbs.db
 .DS_Store
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
+
+# ---------- 临时文件 ----------
+*.tmp
+~$*
+
+# ---------- 大文件 / 安装包（禁止入库） ----------
+招投标采购Agent项目讲解/99_软件下载/
+lj_rag_agent/
