@@ -1,0 +1,52 @@
+# PR 规范检查：PR 标题与提交信息必须符合「类型(模块): 描述」。
+# 对应分配说明 §1.3 提交信息规范（类型取 feat/fix/docs/test/chore，描述用中文）。
+# 模块部分设为可选：兼容 chore: xxx 这类无模块的合法提交。
+
+name: PR Check
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  title:
+    name: PR 标题规范
+    runs-on: ubuntu-latest
+    steps:
+      - name: 校验 PR 标题
+        # 标题经 env 间接引用，避免被 shell 解释（防注入）
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          echo "PR 标题：$PR_TITLE"
+          if ! printf '%s' "$PR_TITLE" | grep -qE '^(feat|fix|docs|test|chore)(\([^)]+\))?: [^[:space:]]'; then
+            echo "::error::PR 标题不符合规范。格式：类型(模块): 描述，例如 feat(rag): ingest 支持多 Excel 合并"
+            exit 1
+          fi
+
+  commits:
+    name: 提交信息规范
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 校验 PR 内每个提交的信息
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          fail=0
+          # merge commit 不检查：推荐 squash 合并，这些中间提交不会进入 main
+          while IFS= read -r msg; do
+            echo "检查提交信息：$msg"
+            if ! printf '%s' "$msg" | grep -qE '^(feat|fix|docs|test|chore)(\([^)]+\))?: [^[:space:]]'; then
+              echo "::error::提交信息不符合规范：$msg（格式：类型(模块): 描述）"
+              fail=1
+            fi
+          done < <(git log --format=%s --no-merges "$BASE"..HEAD)
+          exit $fail
