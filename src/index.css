@@ -1,0 +1,52 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-ink-50 text-ink-900 antialiased;
+    font-family: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  }
+}
+
+@layer components {
+  /* 统一卡片: 圆角 + 边框 + 白底, hover 浮起阴影, 200ms 过渡 */
+  .card {
+    @apply rounded-xl border border-slate-200 bg-white transition-all duration-200 hover:shadow-md;
+  }
+}
+
+/* 滚动条美化: 宽 6px, thumb #CBD5E1, 圆角 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* 页面切换 150ms 淡入 */
+@keyframes page-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.page-fade {
+  animation: page-fade 150ms ease-out;
+}
+
+/* 演示模式: 全站等宽数字 */
+.demo-tabular,
+.demo-tabular * {
+  font-variant-numeric: tabular-nums;
+}
