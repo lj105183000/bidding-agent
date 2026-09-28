@@ -2,9 +2,9 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## ⚠️ 当前状态：骨架阶段（先读这条）
+## ⚠️ 当前状态：开发中（先读这条）
 
-本仓库目前**只有文档，没有代码**。`bidding-agent/docs/` 下的四份文档描述的是**目标架构**，`src/`、`tests/`、`frontend/`、`main.py`、`conftest.py` 均**尚不存在**。
+后端代码已落地于 `bidding-agent/`（`src/`、`tests/`、`conftest.py`、`main.py` 等）；前端位于**仓库根** `frontend/`（Vite 5 SPA，尚未接入后端 API）。`bidding-agent/docs/` 下的文档中，前端相关章节描述的是旧目标架构（Next.js），以本文档为准。
 
 因此：
 
@@ -47,7 +47,7 @@ python main.py ingest                    # 知识库导入：Excel 问/答 → Q
 python main.py api                       # 启动后端 http://localhost:8001（开发带 reload）
 python main.py dev                       # 后台起后端 + 打印前端启动提示
 
-cd frontend && npm install && npm run dev # 前端 http://localhost:3000
+cd frontend && npm install && npm run dev # 前端 http://localhost:5173（Vite）
 
 uv run pytest -q                          # 全量测试（目标 131 例）
 uv run pytest tests/test_react_loop.py -v # 单文件
@@ -65,7 +65,7 @@ uv run uvicorn api.server:app --host 0.0.0.0 --port 8001
 
 ## 目标架构
 
-Next.js 14 前端（:3000）→ FastAPI（:8001）→ `BiddingAgent` 编排**四路数据源**回答招投标问题。
+Vite SPA 前端（:5173，仓库根 `frontend/`）→ FastAPI（:8001）→ `BiddingAgent` 编排**四路数据源**回答招投标问题。
 
 ```
 src/agent/          Agent 编排核心 —— core.py 主体，拆成 Mixin：
@@ -157,6 +157,6 @@ src/config.py       Settings dataclass，__post_init__ 校验必需项，缺失�
 | 首次问答极慢 / 工具 30s 超时 | 嵌入/精排模型冷启动下载，等日志「模型预热完成」；国内设 `HF_ENDPOINT=https://hf-mirror.com` |
 | 检索质量骤降 | `data/vocab.json` 与向量数据不一致 → **换数据后必须重新 ingest** |
 | 「知识库未就绪」503 | `vocab.json` 缺失 → 先 `python main.py ingest` |
-| 前端流式整段一次显示 | SSE 走了缓冲代理。开发时 `lib/api.ts` 绕过 Next 代理直连 :8001；生产用 `NEXT_PUBLIC_API_BASE`，反代需 `proxy_buffering off` |
+| 前端流式整段一次显示（接入 SSE 后） | 响应被代理缓冲。前端为 Vite、无 dev 代理，接入时直连 :8001；生产反代需 `proxy_buffering off` |
 | `Connection refused (WinError 10061)` | 环境代理残留 → 确认出站客户端仍为 `trust_env=False` |
 | `429` 请求过于频繁 | 30 次/60s 滑动窗口；检查是否误开了多 worker |
