@@ -63,6 +63,18 @@
 - 《开发文档.md》§2.3 补 CORS 配置键。
 - CLAUDE.md 状态段（前端尚未接入后端 API 的表述）更新。
 
+## 7. 契约适配（写计划时依据 dev 实际代码确认的偏差）
+
+dev 分支 `src/database/postgresql_client.py` 的实际类名是 `PostgresClient`（非骨架假设的 `PostgreSQLClient`），且存储模型为**逐条消息表**（`save_message` / `load_messages`），不是骨架假设的"整包 messages JSONB upsert"。会话/反馈端点据此适配：
+
+- `POST /api/conversations`：入参不变（`{session_id, title, messages[]}`），但 `messages` 语义改为"**本轮新增的消息**"（前端每回合只发 user/assistant 两条）；服务端按 session_id 找到会话（找不到则 `create_conversation` 建），逐条 `save_message`；响应扩为 `{"status":"ok","ids":[messageId...]}`（前端取 assistant 消息 id 用于反馈）。
+- `GET /api/conversations/{session_id}`：`find_id_by_session` + `load_messages`，响应 `tool_name` 映射为前端契约的 `toolName`。
+- `DELETE /api/conversations`（清空全部）端点**砍掉**（无对应客户端方法，前端用不到）；保留 `DELETE /api/conversations/{session_id}`。
+- `POST /api/feedback`：入参改为 `{session_id, message_id, rating}`（服务端按 session 解析 conversation_id，调 `save_feedback(cid, mid, rating)`）——原骨架的 `question/answer` 字段无对应存储列，去掉。
+- image/imageName 落库：`save_message` 无对应列（vision 本就不在本次范围），前端可传但服务端忽略；开发文档同步注明。
+- 上述端点契约变化须同步《开发文档.md》§5 并通知团队。
+- `PostgresClient` 增加一个小方法 `find_id_by_session(session_id) -> int`（-1 哨兵，与既有约定一致）。
+
 ## 验收标准
 
 1. `uv run pytest` 全绿（含 SSE 口径测试与新增接线测试）。
