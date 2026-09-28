@@ -10,7 +10,7 @@ dependencies = [
     "uvicorn[standard]>=0.51.0",
     "pydantic>=2.13.4",
     # LLM 接入
-    "openai>=2.48.0",
+    "openai>=2.48.0,<3.0.0",
     "zai-sdk>=0.2.3",
     # 数据存储
     "qdrant-client>=1.18.0",
@@ -18,7 +18,7 @@ dependencies = [
     "sqlalchemy>=2.0.51",
     "psycopg[binary]>=3.3.4",
     # 检索与模型
-    "sentence-transformers>=5.6.1",
+    "sentence-transformers>=5.6.1,<6.0.0",
     "jieba>=0.42.1",
     # 联网搜索
     "tavily-python>=0.7.27",
@@ -31,7 +31,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=9.1.1"]
+dev = ["pytest>=9.1.1", "ipykernel>=7.3.0"]
 
 [tool.pytest.ini_options]
 # 让测试可以从仓库根导入 src.* 包
