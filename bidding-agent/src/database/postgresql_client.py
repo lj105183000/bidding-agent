@@ -612,6 +612,8 @@ class PostgresClient:
         rating 取值已被 API 层校验器钉死为 "up"/"down"（server.py FeedbackRequest），
         这里按枚举统计即可。days 上限 90：这是运营看板不是审计系统，窗口太大会把
         "最近趋势"稀释成"历史总量"。
+        两条 SQL 独立执行，极端情况下可能出现 summary 成功而 daily 失败（daily 为空列表）——
+        运营看板场景可接受，读取方不应把 daily=[] 解读为"确定无反馈"。
         """
         days = max(1, min(int(days), 90))
         summary_sql = """
@@ -627,6 +629,7 @@ class PostgresClient:
         GROUP BY 1 ORDER BY 1
         """
         rows = self._query(summary_sql)
+        # count(*) 永不返回空行——走到这里意味着 _query 失败降级，而非"表是空的"
         if not rows:
             return {}
         return {**rows[0], "daily": self._query(daily_sql, (f"{days} days",))}

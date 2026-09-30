@@ -105,3 +105,13 @@ def test_conversation_stats(monkeypatch):
     assert result == {"conversations": 12, "messages": 340}
     sql = cursor.executed[0][0]
     assert "FROM conversations" in sql and "FROM messages" in sql
+
+
+def test_conversation_stats_degrades_to_empty(monkeypatch):
+    client = _make_client(monkeypatch)
+
+    def _fail(**kwargs):
+        raise ConnectionError("down")
+
+    monkeypatch.setattr(pgmod.psycopg, "connect", _fail)
+    assert client.conversation_stats() == {}
