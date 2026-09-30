@@ -31,7 +31,13 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=9.1.1", "ipykernel>=7.3.0"]
+dev = [
+    "pytest>=9.1.1",
+    "ipykernel>=7.3.0",
+    "ragas>=0.4,<0.5",
+    "langchain-openai>=0.3,<0.4",
+    "langchain-community>=0.3,<0.4",
+]
 
 [tool.pytest.ini_options]
 # 让测试可以从仓库根导入 src.* 包
