@@ -604,6 +604,43 @@ class PostgresClient:
         rows = self._query(sql)
         return rows[0] if rows else {}
 
+    # --- 运行看板只读聚合（eval/dashboard.py 用；与 stats_overview 同款降级口径）---
+
+    def feedback_summary(self, days: int = 7) -> dict:
+        """反馈汇总：总数、赞 / 踩、最近 N 天每日反馈数。
+
+        rating 取值已被 API 层校验器钉死为 "up"/"down"（server.py FeedbackRequest），
+        这里按枚举统计即可。days 上限 90：这是运营看板不是审计系统，窗口太大会把
+        "最近趋势"稀释成"历史总量"。
+        """
+        days = max(1, min(int(days), 90))
+        summary_sql = """
+        SELECT count(*)                                AS total,
+               count(*) FILTER (WHERE rating = 'up')   AS up,
+               count(*) FILTER (WHERE rating = 'down') AS down
+        FROM feedback
+        """
+        daily_sql = """
+        SELECT date_trunc('day', created_at)::date AS day, count(*) AS cnt
+        FROM feedback
+        WHERE created_at >= now() - %s::interval
+        GROUP BY 1 ORDER BY 1
+        """
+        rows = self._query(summary_sql)
+        if not rows:
+            return {}
+        return {**rows[0], "daily": self._query(daily_sql, (f"{days} days",))}
+
+    def conversation_stats(self) -> dict:
+        """会话与消息总量（看板"系统真实使用量"一栏）。失败返回空 dict。"""
+        rows = self._query(
+            """
+            SELECT (SELECT count(*) FROM conversations) AS conversations,
+                   (SELECT count(*) FROM messages)      AS messages
+            """
+        )
+        return rows[0] if rows else {}
+
     # --- 会话 / 消息 / 反馈 CRUD ---
 
     def ensure_schema(self) -> bool:
@@ -682,6 +719,23 @@ class PostgresClient:
         """
         sql = "INSERT INTO conversations (session_id, title) VALUES (%s, %s) RETURNING id"
         rows = self._query(sql, (session_id, title))
+        if not rows:
+            return -1
+        return int(rows[0]["id"])
+
+    def find_id_by_session(self, session_id: str) -> int:
+        """按 `session_id` 查会话 `id`；不存在返回 `-1`（与既有 -1 哨兵约定一致）。
+
+        用途：API 层按前端持有的 session_id 定位会话，做消息追加 / 读回 / 删除 / 反馈。
+        同一 session_id 理论上只建一条；若历史数据出现重复，取最新一条（id 最大）。
+        """
+        if not session_id or not str(session_id).strip():
+            return -1
+        rows = self._query(
+            "SELECT id FROM conversations WHERE session_id = %s "
+            "ORDER BY id DESC LIMIT 1",
+            (str(session_id),),
+        )
         if not rows:
             return -1
         return int(rows[0]["id"])
