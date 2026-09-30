@@ -60,6 +60,21 @@
     "reference": "招标人应当自收到评标报告之日起3日内公示中标候选人，公示期不得少于3日。"
   },
   {
+    "question": "华中电力建设公司近三年中标过哪些项目？",
+    "expected_tool": "search_knowledge_graph",
+    "reference": ""
+  },
+  {
+    "question": "华南机电设备公司都给哪些采购单位供应过货物？",
+    "expected_tool": "search_knowledge_graph",
+    "reference": ""
+  },
+  {
+    "question": "2026 年国家层面最新出台了哪些招投标相关法规文件？",
+    "expected_tool": "search_web",
+    "reference": ""
+  },
+  {
     "question": "你好，你能帮我做什么？",
     "expected_tool": "",
     "reference": ""
