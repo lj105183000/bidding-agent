@@ -32,6 +32,12 @@ agent: BiddingAgent | None = None
 
 def eval_one(case: dict) -> dict:
     result = agent.chat(case["question"])
+    # chat() 的错误事件路径不抛异常，而是把错误折进 answer 正常返回，此时 elapsed_ms
+    # 停在初始 0（见 src/agent/core.py chat()）。真跑完一次 LLM+工具链的 done 帧耗时
+    # 不可能为 0，所以 0ms 只能是降级/错误路径——必须判成失败而不是计分：否则 0 值
+    # 会把延迟均值往低了拽（系统最糟时指标反而最好看），明细还会打成"实际为空"掩盖根因。
+    if not result.get("elapsed_ms"):
+        return {"ok": False, "error": "chat 走了降级/错误路径（无计时）"}
     expected = case["expected_tool"]
     actual = result.get("tool_name", "")
     return {
@@ -62,8 +68,11 @@ def main() -> int:
     setup_logging()
     agent = BiddingAgent()
     cases = load_cases(CASES_PATH, required=("question", "expected_tool"))
-    if args.limit:
-        cases = cases[: args.limit]
+    # 负数 limit 会从尾部切片甚至切出空列表，让汇总处 matched/len(results) 除零崩掉整轮；
+    # 钳到 0 后复用 "--limit 0 = 全量" 的既有语义（0 为假值，不进切片分支）
+    limit = max(args.limit, 0)
+    if limit:
+        cases = cases[:limit]
 
     print(f"用例 {len(cases)} 条 | 非流式 chat()，默认参数")
     started = time.perf_counter()
