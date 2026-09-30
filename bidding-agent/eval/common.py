@@ -33,6 +33,10 @@ def load_cases(path: Path, required: tuple[str, ...]) -> list[dict]:
     if not isinstance(cases, list) or not cases:
         raise SystemExit(f"用例文件为空或不是列表：{path}")
     for i, case in enumerate(cases, 1):
+        # 先验类型再取字段：非 dict 元素（手工编辑写成字符串/数字）上做 `in` 会抛 TypeError，
+        # 与"用例问题 → 中文 SystemExit"的契约不一致，必须在这里统一拦截成可读报错。
+        if not isinstance(case, dict):
+            raise SystemExit(f"用例 #{i} 不是对象（dict），实际类型：{type(case).__name__}")
         missing = [f for f in required if f not in case]
         if missing:
             raise SystemExit(f"用例 #{i} 缺少字段：{', '.join(missing)}")
@@ -49,9 +53,14 @@ def run_cases(cases: list[dict], fn: Callable[[dict], dict]) -> list[dict]:
     for i, case in enumerate(cases, 1):
         try:
             result = fn(case)
-            result.setdefault("ok", True)
-        except Exception as exc:  # noqa: BLE001 - 容错是本函数存在的唯一目的
+        except Exception as exc:  # noqa: BLE001 - 容错只兜业务执行异常，不兜调用方契约违反
             result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        else:
+            # 返回值校验放 else（try 外）：fn 返回非 dict 是调用方 bug，
+            # 必须响亮抛出而非被 except 吞掉伪装成"题目失败"。
+            if not isinstance(result, dict):
+                raise TypeError(f"fn 必须返回 dict，实际返回 {type(result).__name__}（题目：{case!r}）")
+            result.setdefault("ok", True)
         results.append(result)
         print(f"  进度 {i}/{total}", end="\r", flush=True)
     print()

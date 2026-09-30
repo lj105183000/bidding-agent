@@ -41,6 +41,23 @@ def test_load_cases_ok(tmp_path):
     ]
 
 
+def test_load_cases_rejects_non_dict_element(tmp_path):
+    path = _write(tmp_path, ["not-a-dict"])
+    with pytest.raises(SystemExit, match="不是对象"):
+        load_cases(path, required=("question",))
+
+
+def test_run_cases_loud_fail_on_non_dict_return():
+    """fn 返回非 dict 是调用方 bug，必须响亮抛出而不是伪装成题目失败。"""
+    cases = [{"n": 1}]
+
+    def bad_fn(case):
+        return "oops"
+
+    with pytest.raises(TypeError, match="必须返回 dict"):
+        run_cases(cases, bad_fn)
+
+
 def test_run_cases_isolates_failures():
     """第 2 题抛异常：1、3 题正常返回，2 题记 ok=False 且带可读错误。"""
     cases = [{"n": 1}, {"n": 2}, {"n": 3}]
