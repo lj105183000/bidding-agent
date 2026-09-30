@@ -5,7 +5,9 @@
 故 ragas 锁 0.4.x 防 API 漂移（见 docs/superpowers/specs/2026-09-30-eval-suite-design.md）。
 
 出站红线：openai SDK 底层 httpx 默认 trust_env=True 会继承系统代理
-（WinError 10061 坑源，见 CLAUDE.md），这里显式注入 trust_env=False 的 http_client。
+（WinError 10061 坑源，见 CLAUDE.md）。ragas 只驱动异步链路（LangchainLLMWrapper.
+agenerate_text → agenerate_prompt），走的是 ChatOpenAI 独立的 http_async_client
+字段——同步/异步两个客户端都必须显式注入 trust_env=False，只配其一等于没配。
 
 用法::
 
@@ -41,8 +43,16 @@ from src.rag import rag_pipeline
 
 CASES_PATH = Path(__file__).resolve().parent / "test_questions.json"
 
-# 汇总时 NaN 视为 0：ragas 对无法判分的样本返回 NaN，直接平均会把整列拖成 NaN
-_METRIC_KEYS = ("faithfulness", "answer_relevancy", "llm_context_recall")
+# ragas 的 evaluate() 内部按「指标实例的 .name」索引 per-sample 分数（evaluation.py）。
+# 0.4.x 里 LLMContextRecall 是旧 ContextRecall 的重导出，.name 仍是 "context_recall"
+# 而非类名暗示的 "llm_context_recall"——曾因手写键名与实际返回不一致，召回列恒为
+# 默认 0.0 且无任何报错。因此读取键一律从实例化指标推导，禁止手写；契约测试
+# （test_ragas_eval.py::test_metric_name_contract）把键名双向钉死防漂移。
+_OUTPUT_KEYS = ("faithfulness", "relevancy", "recall")  # 对外输出列名，main() 表格与测试依赖
+_METRICS = [Faithfulness(), AnswerRelevancy(), LLMContextRecall()]
+_NAME_TO_OUTPUT = {m.name: key for m, key in zip(_METRICS, _OUTPUT_KEYS)}
+# to_pandas 兜底路径按同一组键从 DataFrame 列取值
+_METRIC_KEYS = tuple(_NAME_TO_OUTPUT)
 
 
 class _BGEEmbeddings:
@@ -66,7 +76,7 @@ def _check_ready() -> None:
 
 
 def build_evaluator_llm():
-    """裁判 LLM：DeepSeek 的 OpenAI 兼容端点。http_client 见文件头红线说明。"""
+    """裁判 LLM：DeepSeek 的 OpenAI 兼容端点。双客户端注入见文件头红线说明。"""
     import httpx
     from langchain_openai import ChatOpenAI
 
@@ -77,7 +87,11 @@ def build_evaluator_llm():
         api_key=settings.deepseek_api_key,
         base_url=settings.deepseek_base_url,
         temperature=0.0,
+        # ragas 只走异步路径，异步用的是 ChatOpenAI 独立的 http_async_client 字段：
+        # 只配同步 http_client 的话真实链路会回落到 trust_env=True 的默认客户端，
+        # 代理残留场景（WinError 10061）照样炸，两个都要钉死
         http_client=httpx.Client(trust_env=False, timeout=60.0),
+        http_async_client=httpx.AsyncClient(trust_env=False, timeout=60.0),
     )
 
 
@@ -101,6 +115,11 @@ def eval_one(case: dict, llm, embeddings) -> dict:
     if not sources:
         return {"ok": False, "error": "sources 为空（知识库未命中），该题不计入指标分子"}
 
+    # KB 命中但生成失败时，pipeline 走部分失败路径：sources 非空却带 error 键返回
+    # （pipeline.py 的 chat 收敛逻辑）。这种降级回答不能当有效样本计分，否则指标被污染。
+    if result.get("error"):
+        return {"ok": False, "error": f"pipeline 报错：{result['error']}"}
+
     scores = _extract_scores(evaluate(
         dataset=EvaluationDataset.from_list([{
             "user_input": case["question"],
@@ -108,17 +127,17 @@ def eval_one(case: dict, llm, embeddings) -> dict:
             "retrieved_contexts": sources,
             "reference": case.get("reference", ""),
         }]),
-        metrics=[Faithfulness(), AnswerRelevancy(), LLMContextRecall()],
+        metrics=_METRICS,
         llm=LangchainLLMWrapper(llm),
         embeddings=LangchainEmbeddingsWrapper(embeddings),
     ))
-    return {
-        "ok": True,
-        "faithfulness": 0.0 if math.isnan(scores.get("faithfulness", 0.0)) else scores.get("faithfulness", 0.0),
-        "relevancy": 0.0 if math.isnan(scores.get("answer_relevancy", 0.0)) else scores.get("answer_relevancy", 0.0),
-        "recall": 0.0 if math.isnan(scores.get("llm_context_recall", 0.0)) else scores.get("llm_context_recall", 0.0),
-        "answer": result.get("answer", ""),
-    }
+    row = {"ok": True}
+    for name, out_key in _NAME_TO_OUTPUT.items():
+        v = scores.get(name, 0.0)
+        # NaN 视为 0：ragas 对无法判分的样本返回 NaN，直接平均会把整列拖成 NaN
+        row[out_key] = 0.0 if math.isnan(v) else v
+    row["answer"] = result.get("answer", "")
+    return row
 
 
 def main() -> int:
