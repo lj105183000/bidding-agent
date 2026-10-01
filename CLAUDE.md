@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## ⚠️ 当前状态：开发中（先读这条）
 
-后端代码已落地于 `bidding-agent/`（`src/`、`tests/`、`conftest.py`、`main.py` 等）；前端位于**仓库根** `frontend/`（Vite 5 SPA，尚未接入后端 API）。`bidding-agent/docs/` 下的文档中，前端相关章节描述的是旧目标架构（Next.js），以本文档为准。
+后端代码已落地于 `bidding-agent/`（`src/`、`tests/`、`conftest.py`、`main.py` 等）；前端位于**仓库根** `frontend/`（Vite 5 SPA，**已接入后端 API**：Chat 页走真实流式链路，网络层 `src/lib/api.ts` SSE 直连 :8001）。`bidding-agent/docs/` 下的文档中，前端相关章节描述的是旧目标架构（Next.js），以本文档为准。
 
 因此：
 
 - 文档里的文件路径、函数名、端点**不代表可以在磁盘上读到**；改代码前先 `ls` 确认，不要假设。
-- 初始化提交（`5273154`）只包含：`pyproject.toml`、`.env.example`、`.gitignore`、`README.md`、`.github/workflows/ci.yml`、`docs/`、`分配说明.md`。
+- 前端 Chat 全链路（SSE 流式、provider 切换、联网/深度思考开关、会话持久化与列表、点赞/点踩、停止）已接通后端；Dashboard/extract/price/material/analysis 四页仍为 mock。
 - **CI 是绿的**：`uv run pytest -q`（584 例）全绿；前端 `npm run build`（tsc 无错）+ `vitest run` 通过。
 - 你的任务如果是"实现某模块"，文档已经把契约、验收标准和文件清单写好了——照做即可，不要另起炉灶。
 

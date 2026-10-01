@@ -1,31 +1,31 @@
 # 招投标采购 Agent
 
-面向招投标采购场景的智能问答系统：以 **RAG 混合检索（Qdrant）+ 知识图谱（Neo4j）+ 结构化数据库（PostgreSQL）+ 联网搜索（Tavily/Exa）** 四路数据源为底座，由 **ReAct 多轮工具循环**的 Agent 编排回答，前端 **Next.js 14** 流式渲染（SSE）。
+面向招投标采购场景的智能问答系统：以 **RAG 混合检索（Qdrant）+ 知识图谱（Neo4j）+ 结构化数据库（PostgreSQL）+ 联网搜索（Tavily/Exa）** 四路数据源为底座，由 **ReAct 多轮工具循环**的 Agent 编排回答，前端 **React 18 + Vite 5**（位于仓库根 `frontend/`）流式渲染（SSE）。
 
 ## 快速开始
 
-
+> 完整说明见仓库根 `README.md`；本文件为后端子目录概览。
 
 ```
-\# 1. 安装后端依赖（Python ≥ 3.12，uv 管理）
+# 1. 安装后端依赖（Python ≥ 3.12，uv 管理）
 
 uv sync
 
-\# 2. 配置 .env（必需项：QDRANT\_URL / QDRANT\_API\_KEY / DEEPSEEK\_API\_KEY）
+# 2. 配置 .env（必需项：QDRANT_URL / QDRANT_API_KEY / DEEPSEEK_API_KEY）
 
-\#    首次运行嵌入/精排模型请设置 HF\_ENDPOINT=https://hf-mirror.com
+#    首次运行嵌入/精排模型请设置 HF_ENDPOINT=https://hf-mirror.com
 
-\# 3. 导入知识库（Excel 问/答 → Qdrant）
+# 3. 导入知识库（Excel 问/答 → Qdrant）
 
 python main.py ingest
 
-\# 4. 启动后端（http://localhost:8001，接口文档 /docs）
+# 4. 启动后端（http://localhost:8001，接口文档 /docs）
 
 python main.py api
 
-\# 5. 启动前端（另开终端，http://localhost:3000）
+# 5. 启动前端（另开终端，在仓库根 frontend/ 目录下，http://localhost:5173）
 
-cd frontend && npm install && npm run dev
+cd ../frontend && npm install && npm run dev
 ```
 
 ## 文档地图
@@ -71,9 +71,7 @@ cd frontend && npm install && npm run dev
 
 │   └── ...                  # web\_search / config / rate\_limiter / http\_client 等
 
-├── frontend/                # Next.js 14 前端（SSE 流式渲染）
-
-├── tests/                   # pytest 131 例
+├── tests/                   # pytest 561 例
 
 ├── eval/                    # RAG / Agent 评测
 
