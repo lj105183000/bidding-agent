@@ -16,9 +16,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: 单元测试（uv + pytest）
+  backend:
+    name: 后端测试（uv + pytest，含依赖约束校验）
     runs-on: ubuntu-latest
+    # 后端工程在 bidding-agent/ 子目录（仓库根没有 pyproject.toml），
+    # 不钉 working-directory 的话 uv sync --frozen 在根目录找不到工程直接失败
+    defaults:
+      run:
+        working-directory: bidding-agent
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -30,6 +35,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      # 软件包约束①：uv.lock 必须满足 pyproject.toml 声明的版本约束（如 openai <3.0.0 上界），
+      # 锁定的解析结果与声明不符则 --check 直接失败，不给过。
+      - name: 校验依赖约束（uv lock --check）
+        run: uv lock --check
+
       # --frozen 只按 uv.lock 安装：保证 CI 与本地依赖完全一致，
       # 谁改了依赖但忘了提交 lock 文件会在这里失败，而不是悄悄装出不同环境
       - name: 同步依赖（按 uv.lock 锁定）
@@ -37,3 +47,32 @@ jobs:
 
       - name: 运行测试
         run: uv run pytest -q
+
+  frontend:
+    name: 前端构建与测试（npm ci + build + vitest）
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # 固定 Node 20 并缓存 npm：package-lock.json 不变时 npm ci 只需秒级
+      - name: 安装 Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # 软件包约束②：npm ci 只按 frontend/package-lock.json 安装，
+      # package.json 与 lock 不一致（如手改依赖忘了跑 npm install）会直接失败，不给过。
+      - name: 校验前端依赖约束（npm ci）
+        run: npm ci
+        working-directory: frontend
+
+      - name: 类型检查与构建（tsc -b && vite build）
+        run: npm run build
+        working-directory: frontend
+
+      - name: SSE 解析器单测（vitest run）
+        run: npm run test
+        working-directory: frontend

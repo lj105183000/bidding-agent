@@ -43,6 +43,14 @@ jobs:
           fail=0
           # merge commit 不检查：推荐 squash 合并，这些中间提交不会进入 main
           while IFS= read -r msg; do
+            # 豁免规范生效前的两条历史提交（PR #5 全量带入 dev 历史）：
+            # 为过检而改写已推送的共享历史不值得，故按条列白名单而非放宽正则
+            case "$msg" in
+              "ci：增加安全检查、pr-check 工作流并优化 ci.yml"|\
+              "保存当前项目状态，作为大规模改动前的基线")
+                echo "豁免历史提交：$msg"
+                continue;;
+            esac
             echo "检查提交信息：$msg"
             if ! printf '%s' "$msg" | grep -qE '^(feat|fix|docs|test|chore)(\([^)]+\))?: [^[:space:]]'; then
               echo "::error::提交信息不符合规范：$msg（格式：类型(模块): 描述）"
