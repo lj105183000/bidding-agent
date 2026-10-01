@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - 文档里的文件路径、函数名、端点**不代表可以在磁盘上读到**；改代码前先 `ls` 确认，不要假设。
 - 初始化提交（`5273154`）只包含：`pyproject.toml`、`.env.example`、`.gitignore`、`README.md`、`.github/workflows/ci.yml`、`docs/`、`分配说明.md`。
-- **CI 目前是红的**：`uv run pytest -q` 在无测试文件时返回退出码 5（no tests ran）。要绿需要先有 `tests/` 与 `conftest.py`。
+- **CI 是绿的**：`uv run pytest -q`（584 例）全绿；前端 `npm run build`（tsc 无错）+ `vitest run` 通过。
 - 你的任务如果是"实现某模块"，文档已经把契约、验收标准和文件清单写好了——照做即可，不要另起炉灶。
 
 ## 仓库布局
