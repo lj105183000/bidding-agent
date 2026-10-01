@@ -153,7 +153,14 @@ def main() -> int:
     if args.limit:
         cases = cases[: args.limit]
 
-    llm = build_evaluator_llm()
+    try:
+        llm = build_evaluator_llm()
+    except Exception as exc:
+        # ChatOpenAI 在 main() 构造期就 eagerly 校验 api_key（openai SDK 行为），失败发生在
+        # run_cases 的逐题容错之前——必须在此拦住，否则裸的英文 traceback 直接甩给用户，
+        # 违反异常分级约定。OpenAIError 文案本身干净（不含密钥），str(exc) 可直接展示。
+        print(f"裁判 LLM 构建失败：{exc}（请检查 .env 的 DEEPSEEK_API_KEY）")
+        return 1
     embeddings = _BGEEmbeddings()
 
     print(f"用例 {len(cases)} 条 | 裁判模型：{llm.model_name}")
