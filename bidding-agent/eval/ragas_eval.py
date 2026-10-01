@@ -150,8 +150,12 @@ def main() -> int:
     setup_logging()
     _check_ready()
     cases = load_cases(CASES_PATH, required=("question", "reference"))
-    if args.limit:
-        cases = cases[: args.limit]
+    # 负数 limit 会从尾部切片甚至切出空列表，静默评测错误子集（mean 对空列表回 0，汇总列
+    # 全 0 也看不出异常，比直接崩更危险）；钳到 0 后复用 "--limit 0 = 全量" 的既有语义
+    # （0 为假值，不进切片分支）
+    limit = max(args.limit, 0)
+    if limit:
+        cases = cases[:limit]
 
     try:
         llm = build_evaluator_llm()

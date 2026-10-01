@@ -7,6 +7,7 @@ ragas 指标读 .name（纯内存操作），把分数键名钉死在真实指�
 """
 
 from types import SimpleNamespace
+import sys
 
 import eval.ragas_eval as mod
 
@@ -16,7 +17,11 @@ class _FakePipeline:
 
     error 模拟 RAGPipeline 的部分失败路径：KB 命中（sources 非空）但生成报错，
     此时 chat 仍带 error 键返回——见 src/rag/pipeline.py 的事件收敛逻辑。
+    ready/ready_error 供 main() 的 _check_ready 读取（真实 pipeline 的就绪探针）。
     """
+
+    ready = True
+    ready_error = ""
 
     def __init__(self, sources=None, answer="一般不超过项目估算价的2%", error=None):
         self._sources = sources if sources is not None else [{"content": "保证金不超过2%"}]
@@ -117,3 +122,22 @@ def test_metric_name_contract():
     assert set(mod._NAME_TO_OUTPUT) == real_names
     # to_pandas 兜底路径读取同一组键，不能单独漂移
     assert set(mod._METRIC_KEYS) == real_names
+
+
+def test_main_negative_limit_runs_all_cases(monkeypatch):
+    """--limit 负数不得从尾部切片：钳到 0 走全量（与 agent_eval 的负数防护同口径）。
+
+    不抽 _apply_limit 助手是为了与 agent_eval 的 main() 结构逐字对齐，故在 main() 层
+    验证：--limit -3 配 4 条用例，负数若未钳制会切成 cases[:-3] 只剩 1 条。
+    """
+    calls = _patch_env(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["ragas_eval.py", "--limit", "-3"])
+    monkeypatch.setattr(
+        mod, "load_cases",
+        lambda *a, **k: [{"question": f"第{i}题", "reference": "r"} for i in range(1, 5)],
+    )
+    monkeypatch.setattr(mod, "build_evaluator_llm", lambda: SimpleNamespace(model_name="fake-judge"))
+
+    assert mod.main() == 0
+    # 4 条全部进评测：负数 limit 被钳成全量，而非静默评测尾部切出的错误子集
+    assert len(calls) == 4

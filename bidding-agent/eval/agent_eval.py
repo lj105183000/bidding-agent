@@ -4,6 +4,8 @@
 tool_name 是"最后一个执行完的工具"单字符串，与 expected_tool 精确相等才算对。
 多轮 ReAct 后工具名可能与第一直觉不同——用例标注时就按这个口径来。
 
+未配置 LLM key 时逐题降级为 [失败]（不做启动预检），真实分数需在 .env 配齐后跑。
+
 用法::
 
     python eval/agent_eval.py                # 全量
