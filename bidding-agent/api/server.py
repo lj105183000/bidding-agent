@@ -2,6 +2,11 @@
 
 端点契约见 docs/开发文档.md §5；SSE 事件协议见 §6。
 错误码：400 参数 / 413 图片过大 / 422 枚举校验 / 429 限流 / 500 处理异常 / 503 依赖未就绪。
+
+SSE 帧统一由 `BiddingAgent.chat_stream` 产出（`type` 键，done 帧含
+sources / web_sources / tool_called / tool_name / elapsed_ms / phase_times，
+tool_name 为单字符串）——本文件只负责透传与包装，不再自行拼 event 帧。
+会话 / 反馈端点按接口联调 spec §7 适配 PostgresClient 的逐条消息存储模型。
 """
 
 import json
@@ -14,7 +19,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
-from src.clients.llm_factory import get_llm_client
 from src.config import settings
 from src.rate_limiter import RateLimiter
 
@@ -26,11 +30,28 @@ rate_limiter = RateLimiter(
     window_seconds=settings.rate_limit_window,
 )
 
-# SSE 首帧 2KB padding：强制代理/缓冲区立即 flush（见 §6.1）
+# SSE 首帧 2KB padding：强制代理/缓冲区立即 flush（见 §6.1）。
+# 由 BiddingAgent.chat_stream 产出，此处仅保留一个错误帧构造辅助。
 _SSE_PADDING = ":" + " " * 2048 + "\n\n"
 
 # 图片 base64 上限（约 3MB），超限返回 413
 _MAX_IMAGE_BASE64_CHARS = 4_000_000
+
+# BiddingAgent 单例（懒构造：初始化失败记录日志并以 None 兜底，chat* 端点据此返回 503）
+try:
+    from src.agent import BiddingAgent
+
+    bidding_agent: BiddingAgent | None = BiddingAgent()
+except Exception:  # pragma: no cover - 初始化失败属部署异常
+    logger.exception("BiddingAgent 初始化失败，对话端点将返回 503")
+    bidding_agent = None
+
+
+def _error_sse(content: str) -> str:
+    """构造单条 error 帧（type 键口径，与 §6 协议一致）。"""
+    return "data: " + json.dumps(
+        {"type": "error", "content": content}, ensure_ascii=False
+    ) + "\n\n"
 
 
 # ---------------------------------------------------------------------------
@@ -71,7 +92,7 @@ class VisionRequest(BaseModel):
 
 
 class ConversationRequest(BaseModel):
-    """会话保存请求。"""
+    """会话保存请求（接口联调 spec §7：messages 为**本轮新增**的消息）。"""
 
     session_id: str = Field(..., min_length=1)
     title: str = Field(default="")
@@ -79,11 +100,10 @@ class ConversationRequest(BaseModel):
 
 
 class FeedbackRequest(BaseModel):
-    """用户反馈请求。"""
+    """用户反馈请求（spec §7：按 session_id 解析会话，关联 assistant 消息 id）。"""
 
     session_id: str = Field(..., min_length=1)
-    question: str = Field(..., min_length=1)
-    answer: str = Field(..., min_length=1)
+    message_id: int = Field(..., description="assistant 消息 id（保存会话时返回的 ids 中取）")
     rating: str = Field(..., description='枚举 "up" / "down"')
 
     @field_validator("rating")
@@ -98,30 +118,6 @@ class FeedbackRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # 辅助函数
 # ---------------------------------------------------------------------------
-
-
-def normalize_history(
-    history: list[dict[str, str]] | None,
-) -> list[dict[str, str]]:
-    """只保留最近 5 轮对话。"""
-    if not history:
-        return []
-    return history[-5:]
-
-
-def build_messages(
-    question: str,
-    history: list[dict[str, str]] | None,
-) -> list[dict[str, str]]:
-    """构造发送给 LLM 的标准消息列表。"""
-    messages = normalize_history(history)
-    messages.append({"role": "user", "content": question})
-    return messages
-
-
-def sse_event(event: str, data: dict[str, Any]) -> str:
-    """将结构化事件序列化为 SSE JSON 帧。"""
-    return f"data: {json.dumps({'event': event, **data}, ensure_ascii=False)}\n\n"
 
 
 def _client_ip(request: Request) -> str:
@@ -139,21 +135,22 @@ _pg_unavailable_logged = False
 
 
 def _get_postgres_client():
-    """懒加载 PostgreSQL 客户端（C 组成员负责实现）。
+    """懒加载 PostgreSQL 客户端（src.database.postgresql_client）。
 
     模块未就绪或连接失败时返回 None，调用方据此返回 503。
+    注意实际类名是 `PostgresClient`（非骨架假设的 PostgreSQLClient）。
     """
     global _pg_unavailable_logged
     try:
-        from src.database.postgresql_client import PostgreSQLClient  # type: ignore
+        from src.database.postgresql_client import PostgresClient
 
-        return PostgreSQLClient()
-    except (ImportError, ModuleNotFoundError):
-        # C 组尚未实现，属预期情况，仅首次打印提示
+        return PostgresClient()
+    except (ImportError, ModuleNotFoundError, ValueError):
+        # 未实现或缺必需配置，属预期情况，仅首次打印提示
         if not _pg_unavailable_logged:
             logger.warning(
-                "PostgreSQL 客户端（src.database.postgresql_client）尚未实现，"
-                "会话/反馈接口将返回 503。"
+                "PostgreSQL 客户端（src.database.postgresql_client.PostgresClient）"
+                "不可用，会话/反馈接口将返回 503。"
             )
             _pg_unavailable_logged = True
         return None
@@ -218,13 +215,13 @@ async def validation_exception_handler(request: Request, exc):
 def health_check() -> dict[str, Any]:
     """返回 API 及依赖组件的当前状态。
 
-    各组件就绪状态由对应模块（B/C/A）在实现后回填；
-    当前骨架阶段除 API 本身外均为未就绪。
+    agent_ready 反映 BiddingAgent 单例是否初始化成功；pg_ready 反映 Postgres
+    客户端能否构造（真正连通性由会话端点按需判断）。
     """
     return {
-        "ready": False,  # RAG 流水线未初始化（B 组实现后回填）
-        "agent_ready": False,  # Agent 未初始化（A 组实现后回填）
-        "graph_ready": False,  # Neo4j 未连接（C 组实现后回填）
+        "ready": bidding_agent is not None,
+        "agent_ready": bidding_agent is not None,
+        "graph_ready": False,  # Neo4j 未接入本次联调范围
         "pg_ready": _get_postgres_client() is not None,
         "points_count": 0,
         "latencies": {
@@ -241,45 +238,31 @@ def health_check() -> dict[str, Any]:
 
 
 @app.post("/api/chat/stream")
-async def chat_stream(request: ChatRequest) -> StreamingResponse:
-    """SSE 流式对话（推荐）。事件协议见 docs/开发文档.md §6。"""
+def chat_stream(request: ChatRequest) -> StreamingResponse:
+    """SSE 流式对话（推荐）。事件协议见 docs/开发文档.md §6。
+
+    事件帧由 `bidding_agent.chat_stream` 直接产出（type 键、首帧 padding、
+    末帧 [DONE] 均已含），本端点只透传；Agent 未就绪时返回首帧即 error。
+    """
     _require_question(request.question)
-    messages = build_messages(request.question, request.history)
 
-    async def event_generator():
-        # 首帧 2KB padding，强制代理立即 flush
-        yield _SSE_PADDING
-
+    def event_generator():
+        if bidding_agent is None:
+            yield _SSE_PADDING
+            yield _error_sse("Agent 未就绪，请稍后重试")
+            return
         try:
-            client = get_llm_client(request.provider)
-
-            yield sse_event("status", {"content": "正在生成回答"})
-
-            if request.deep_thinking_enabled:
-                async for chunk in client.chat_stream_thinking(messages):
-                    if chunk["type"] == "thinking":
-                        yield sse_event("thinking", {"content": chunk["content"]})
-                    elif chunk["type"] == "content":
-                        yield sse_event("token", {"content": chunk["content"]})
-            else:
-                async for content in client.chat_stream(messages):
-                    yield sse_event("token", {"content": content})
-
-            yield sse_event(
-                "done",
-                {
-                    "sources": [],
-                    "web_sources": [],
-                    "tool_called": False,
-                    "tool_name": "",
-                    "elapsed_ms": 0,
-                    "phase_times": {},
-                },
+            yield from bidding_agent.chat_stream(
+                question=request.question,
+                history=request.history,
+                web_search_enabled=request.web_search_enabled,
+                provider=request.provider or "",
+                deep_thinking_enabled=request.deep_thinking_enabled,
             )
         except Exception:
             # 异常只进日志，不向用户泄露内部地址 / 原始异常
             logger.exception("流式对话失败")
-            yield sse_event("error", {"content": "回答生成失败，请稍后重试"})
+            yield _error_sse("回答生成失败，请稍后重试")
 
     return StreamingResponse(
         event_generator(),
@@ -292,37 +275,23 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
 
 
 @app.post("/api/chat")
-async def chat(request: ChatRequest) -> dict[str, Any]:
-    """非流式对话（已废弃，保留兼容）。"""
+def chat(request: ChatRequest) -> dict[str, Any]:
+    """非流式对话（评测 / 脚本调用，保留兼容）。"""
     _require_question(request.question)
-    messages = build_messages(request.question, request.history)
+    if bidding_agent is None:
+        raise HTTPException(status_code=503, detail="Agent 未就绪，请稍后重试")
 
     try:
-        client = get_llm_client(request.provider)
-
-        if request.deep_thinking_enabled:
-            content_parts: list[str] = []
-            async for chunk in client.chat_stream_thinking(messages):
-                if chunk["type"] == "content":
-                    content_parts.append(chunk["content"])
-            answer = "".join(content_parts)
-        else:
-            answer = await client.chat(messages)
-
-        return {
-            "answer": answer,
-            "sources": [],
-            "tool_called": False,
-            "tool_name": "",
-            "provider": client.provider,
-            "model": client.model_name,
-        }
+        return bidding_agent.chat(
+            question=request.question,
+            history=request.history,
+            web_search_enabled=request.web_search_enabled,
+            provider=request.provider or "",
+            deep_thinking_enabled=request.deep_thinking_enabled,
+        )
     except Exception:
         logger.exception("非流式对话失败")
-        raise HTTPException(
-            status_code=500,
-            detail="回答生成失败，请稍后重试",
-        )
+        raise HTTPException(status_code=500, detail="回答生成失败，请稍后重试")
 
 
 @app.post("/api/ask")
@@ -332,8 +301,10 @@ async def ask(request: AskRequest) -> dict[str, Any]:
     messages = [{"role": "user", "content": request.question}]
 
     try:
-        client = get_llm_client()
-        answer = await client.chat(messages)
+        from src.clients.llm_factory import get_llm_client
+
+        client = get_llm_client(settings.llm_provider)
+        answer = "".join(client.chat_stream(messages))
         return {
             "answer": answer,
             "sources": [],
@@ -384,38 +355,69 @@ async def vision(request: VisionRequest) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# 会话与反馈（PostgreSQL）
+# 会话与反馈（PostgreSQL，接口联调 spec §7 契约适配）
 # ---------------------------------------------------------------------------
+
+# 允许落库的 role / 单条消息保留字段：thinking 与计时不落库（PersistedMessage 契约）
+_ALLOWED_ROLES = ("user", "assistant")
 
 
 @app.post("/api/conversations")
-async def save_conversation(request: ConversationRequest) -> dict[str, str]:
-    """保存会话（新会话插入，已存在则更新；空 title 保留库中原值）。"""
+def save_conversation(request: ConversationRequest) -> dict[str, Any]:
+    """保存本轮新增消息。
+
+    messages 语义为**本轮新增**的 user/assistant 消息（前端每回合只发两条）。
+    服务端按 session_id 找到会话（找不到则 create_conversation 新建），
+    逐条 save_message；响应带每条消息的 id（前端取 assistant 消息 id 用于反馈）。
+    """
     pg = _get_postgres_client()
     if pg is None:
         raise HTTPException(status_code=503, detail="会话服务未就绪")
 
     try:
-        pg.upsert_conversation(
-            session_id=request.session_id,
-            title=request.title,
-            messages=request.messages,
-        )
-        return {"status": "ok"}
+        conversation_id = pg.find_id_by_session(request.session_id)
+        if conversation_id < 0:
+            conversation_id = pg.create_conversation(
+                title=request.title, session_id=request.session_id
+            )
+            if conversation_id < 0:
+                logger.error("创建会话失败：session_id=%s", request.session_id)
+                raise HTTPException(status_code=503, detail="会话保存失败")
+
+        ids: list[int] = []
+        for msg in request.messages:
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role")
+            content = msg.get("content")
+            if role not in _ALLOWED_ROLES or not content or not str(content).strip():
+                continue
+            mid = pg.save_message(
+                conversation_id=conversation_id,
+                role=role,
+                content=str(content),
+                sources=msg.get("sources"),
+                tool_name=msg.get("toolName"),
+            )
+            if mid >= 0:
+                ids.append(mid)
+        return {"status": "ok", "ids": ids}
+    except HTTPException:
+        raise
     except Exception:
         logger.exception("保存会话失败")
         raise HTTPException(status_code=503, detail="会话保存失败")
 
 
 @app.get("/api/conversations")
-async def list_conversations(q: str = "") -> dict[str, Any]:
-    """获取会话列表；q 非空时全文搜索。"""
+def list_conversations() -> dict[str, Any]:
+    """获取会话列表（新建的在前）。"""
     pg = _get_postgres_client()
     if pg is None:
         raise HTTPException(status_code=503, detail="会话服务未就绪")
 
     try:
-        conversations = pg.list_conversations(q=q or None)
+        conversations = pg.list_conversations()
         return {"conversations": conversations}
     except Exception:
         logger.exception("获取会话列表失败")
@@ -423,46 +425,47 @@ async def list_conversations(q: str = "") -> dict[str, Any]:
 
 
 @app.get("/api/conversations/{session_id}")
-async def get_conversation(session_id: str) -> dict[str, Any]:
-    """获取单个会话；不存在时 messages 为 []。"""
+def get_conversation(session_id: str) -> dict[str, Any]:
+    """获取单个会话的全部消息；不存在时 messages 为 []。
+
+    `tool_name` 映射为前端契约的 `toolName`；sources 原样返回。
+    """
     pg = _get_postgres_client()
     if pg is None:
         raise HTTPException(status_code=503, detail="会话服务未就绪")
 
     try:
-        conv = pg.get_conversation(session_id)
-        if conv is None:
+        conversation_id = pg.find_id_by_session(session_id)
+        if conversation_id < 0:
             return {"session_id": session_id, "messages": []}
-        return conv
+        rows = pg.load_messages(conversation_id)
+        messages = [
+            {
+                "id": row["id"],
+                "role": row["role"],
+                "content": row["content"],
+                "sources": row.get("sources"),
+                "toolName": row.get("tool_name"),
+            }
+            for row in rows
+        ]
+        return {"session_id": session_id, "messages": messages}
     except Exception:
         logger.exception("获取会话失败")
         raise HTTPException(status_code=503, detail="获取会话失败")
 
 
-@app.delete("/api/conversations")
-async def clear_conversations() -> dict[str, str]:
-    """清空全部会话。"""
-    pg = _get_postgres_client()
-    if pg is None:
-        raise HTTPException(status_code=503, detail="会话服务未就绪")
-
-    try:
-        pg.clear_conversations()
-        return {"status": "ok"}
-    except Exception:
-        logger.exception("清空会话失败")
-        raise HTTPException(status_code=503, detail="清空会话失败")
-
-
 @app.delete("/api/conversations/{session_id}")
-async def delete_conversation(session_id: str) -> dict[str, str]:
-    """删除单个会话。"""
+def delete_conversation(session_id: str) -> dict[str, str]:
+    """删除单个会话（含其消息与反馈）。"""
     pg = _get_postgres_client()
     if pg is None:
         raise HTTPException(status_code=503, detail="会话服务未就绪")
 
     try:
-        pg.delete_conversation(session_id)
+        conversation_id = pg.find_id_by_session(session_id)
+        if conversation_id >= 0:
+            pg.delete_conversation(conversation_id)
         return {"status": "ok"}
     except Exception:
         logger.exception("删除会话失败")
@@ -470,17 +473,22 @@ async def delete_conversation(session_id: str) -> dict[str, str]:
 
 
 @app.post("/api/feedback")
-async def save_feedback(request: FeedbackRequest) -> dict[str, str]:
-    """保存用户反馈。rating 非法值由校验器拦截返回 422。"""
+def save_feedback(request: FeedbackRequest) -> dict[str, str]:
+    """保存用户反馈。rating 非法值由校验器拦截返回 422。
+
+    按 session_id 解析 conversation_id，再调 save_feedback(cid, mid, rating)。
+    """
     pg = _get_postgres_client()
     if pg is None:
         raise HTTPException(status_code=503, detail="反馈服务未就绪")
 
     try:
-        pg.insert_feedback(
-            session_id=request.session_id,
-            question=request.question,
-            answer=request.answer,
+        conversation_id = pg.find_id_by_session(request.session_id)
+        if conversation_id < 0:
+            return {"status": "ok"}  # 会话未落库：无对象可反馈，静默成功
+        pg.save_feedback(
+            conversation_id=conversation_id,
+            message_id=request.message_id,
             rating=request.rating,
         )
         return {"status": "ok"}
