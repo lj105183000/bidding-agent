@@ -37,7 +37,9 @@ def main() -> None:
         try:
             from src.rag.ingest import ingest_data  # type: ignore
 
-            ingest_data(force=True)
+            # 支持 `python main.py ingest [数据文件]`；默认导入问答知识库 data/qa.xlsx，
+            # 避免 data/processed 下的招投标等非问答表抢走默认定位。
+            ingest_data(force=True, path=sys.argv[2] if len(sys.argv) > 2 else "data/qa.xlsx")
         except ImportError:
             print(
                 "[main] ingest 模块尚未就绪（src/rag/ingest.py 由 B 组实现），"
