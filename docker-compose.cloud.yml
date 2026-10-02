@@ -1,0 +1,116 @@
+# 招投标采购 Agent —— 云服务器基础设施编排（V100 32GB 版）
+#
+# 统一管理 4 个服务容器：PostgreSQL / Neo4j / Qdrant / vLLM(8B)
+# 后端 uvicorn 与前端 vite 保持进程运行，不纳入本文件。
+#
+# 使用：
+#   docker compose up -d        # 启动全部
+#   docker compose ps           # 查看状态
+#   docker compose down         # 停止（数据保留在卷里）
+#
+# 环境变量：从本文件同目录的 .env 读取。
+
+name: bidding-agent
+
+services:
+  # ---------- 业务数据库 ----------
+  postgres:
+    image: docker.m.daocloud.io/library/postgres:16
+    container_name: bid-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-chatbot}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-chatbot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---------- 知识图谱 ----------
+  neo4j:
+    image: docker.m.daocloud.io/library/neo4j:5-community
+    container_name: bid-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: ${NEO4J_AUTH}
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ---------- 向量库（RAG 问答知识库） ----------
+  qdrant:
+    image: docker.m.daocloud.io/qdrant/qdrant:latest
+    container_name: bid-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---------- 本地大模型推理（vLLM + DeepSeek-R1-0528-Qwen3-8B Int4 量化） ----------
+  # 需 NVIDIA GPU；模型 compressed-tensors Int4-W4A16（约 6GB），V100 32GB 运行充足
+  # gpu_memory_utilization 0.55 = 17.6GB，兼顾本服务器可能被其他组占用的显存
+  vllm:
+    image: docker.m.daocloud.io/vllm/vllm-openai:v0.8.5
+    container_name: bid-vllm
+    restart: unless-stopped
+    gpus: all
+    ports:
+      - "8000:8000"
+    volumes:
+      - /home/admin/group_7/models/Qwen3-8B-GGUF:/models:ro
+      - /home/admin/group_7/models/Qwen3-8B-tok:/tok:ro
+    command:
+      - --model
+      - /models/Qwen3-8B-Q4_K_M.gguf
+      - --tokenizer
+      - /tok
+      - --served-model-name
+      - deepseek-r1-0528-qwen3-8b
+      - --quantization
+      - gguf
+      - --max-model-len
+      - "4096"
+      - --gpu-memory-utilization
+      - "0.55"
+      - --dtype
+      - half
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+volumes:
+  postgres_data:
+    name: bid_postgres_data
+  neo4j_data:
+    name: bid_neo4j_data
+  neo4j_logs:
+    name: bid_neo4j_logs
+  qdrant_data:
+    name: bid_qdrant_data
