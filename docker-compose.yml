@@ -1,0 +1,120 @@
+# 招投标采购 Agent —— 基础设施编排
+#
+# 统一管理 4 个服务容器：PostgreSQL / Neo4j / Qdrant / vLLM
+# 后端 uvicorn 与前端 vite 保持本地进程运行，不纳入本文件。
+#
+# 使用：
+#   docker compose up -d        # 启动全部
+#   docker compose ps           # 查看状态
+#   docker compose down         # 停止（数据保留在卷里）
+#   docker compose logs -f      # 跟日志
+#
+# 环境变量：从本文件同目录的 .env 读取（已被 .gitignore 忽略，密钥安全）。
+#           模板见 .env.example（无密钥，可入库）；实际值来自 bidding-agent/.env。
+#
+# 数据复用（第一次接管时）：
+#   - postgres：挂外部命名卷 bid_postgres_data（现有 8751 行数据，无需迁移）
+#   - neo4j / qdrant：使用新命名卷，需把旧容器数据复制过来（见下方 migrate 说明）
+
+name: bidding-agent
+
+services:
+  # ---------- 业务数据库 ----------
+  postgres:
+    image: postgres:16
+    container_name: bid-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-chatbot}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-chatbot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---------- 知识图谱 ----------
+  neo4j:
+    image: neo4j:5-community
+    container_name: bid-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: ${NEO4J_AUTH}
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ---------- 向量库（RAG 问答知识库） ----------
+  # 注意：镜像 tag 用本机已拉取的 daocloud 加速源；若换机器可改回 qdrant/qdrant:latest
+  qdrant:
+    image: docker.m.daocloud.io/qdrant/qdrant:latest
+    container_name: bid-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---------- 本地大模型推理（vLLM + 微调路由模型 qwen3-router，Qwen3-1.7B） ----------
+  # 需 NVIDIA GPU；WSL2 下必须开 VLLM_WSL2_ENABLE_PIN_MEMORY=1（否则报 UVA is not available）
+  # 1.7B 权重约 1.1GB，8GB 显存轻松运行；8B 量化模型在 8GB 显存下因 KV cache 空间不足无法加载（已弃用）
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: bid-vllm
+    restart: unless-stopped
+    gpus: all
+    environment:
+      VLLM_WSL2_ENABLE_PIN_MEMORY: "1"
+    ports:
+      - "8000:8000"
+    volumes:
+      - D:/NLP_learning/router_finetune/output/qwen3-router-merged:/models:ro
+    command:
+      - --model
+      - /models
+      - --served-model-name
+      - qwen3-router
+      - --max-model-len
+      - "2048"
+      - --gpu-memory-utilization
+      - "0.5"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+volumes:
+  # postgres 复用现有命名卷（含已导入的 8751 行数据），external 表示已存在、不自动创建
+  postgres_data:
+    external: true
+    name: bid_postgres_data
+  neo4j_data:
+    name: bid_neo4j_data
+  neo4j_logs:
+    name: bid_neo4j_logs
+  qdrant_data:
+    name: bid_qdrant_data
