@@ -1,4 +1,4 @@
-// 标讯智能提取演示样例: rawText 为基于 reference/bids.xlsx 真实记录字段还原的公告原文
+// 标讯智能提取演示样例：rawText 为基于内部标讯数据集真实记录字段还原的公告原文
 // expected 为对应记录的结构化字段(17 字段中的 14 个关键字段)
 import type { BidRecord } from './bids'
 

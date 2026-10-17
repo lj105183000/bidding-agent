@@ -120,7 +120,6 @@ uv run uvicorn api.server:app --host 0.0.0.0 --port 8001
 │   ├── batch/                       # 数据处理脚本
 │   └── docs/                        # 开发文档 / 技术栈 / 组件工作机制
 ├── docs/superpowers/                # 设计与实施记录（plans / specs）
-├── reference/                       # 参考数据（问答样例 / 标讯样例）
 ├── scripts/                         # 启动与运维脚本
 ├── .github/workflows/               # CI / 评测门禁 / 安全检查
 ├── CLAUDE.md / AGENTS.md            # AI 编码助手工作指引

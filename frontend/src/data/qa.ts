@@ -1,4 +1,4 @@
-// 数据来源: reference/qa.xlsx(80 条原始问答, 按“问”去重后 74 条)
+// 数据来源：内部问答数据集（80 条原始问答，按“问”去重后 74 条）
 export interface QAItem {
   id: string
   question: string

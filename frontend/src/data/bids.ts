@@ -1,4 +1,4 @@
-// 数据来源: reference/bids.xlsx Sheet2(8789 条标讯, 精选 18 条)
+// 数据来源：内部标讯数据集（8789 条记录，精选 18 条作为演示样例）
 export interface BidRecord {
   id: string
   title: string

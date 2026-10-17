@@ -1,5 +1,5 @@
 // 集采分析与推荐 mock 数据
-// TOP_SUPPLIERS 来源于 reference/bids.xlsx 真实中标人统计(按累计中标金额排序, 金额单位: 万元)
+// TOP_SUPPLIERS 来源于内部标讯数据集（真实中标人统计，按累计中标金额排序，金额单位：万元）
 interface Kpi {
   totalBids: number
   provinces: number
