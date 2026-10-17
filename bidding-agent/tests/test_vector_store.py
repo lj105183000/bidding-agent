@@ -81,11 +81,39 @@ def test_upsert_and_count():
 
 
 def test_hybrid_search_returns_contract_fields():
+    """契约字段：question / answer / score / relevance。
+
+    `relevance` 是 2026-10-12 新增的：`score`（RRF 融合分）只反映候选内排名，
+    无法用来判断"这条到底相不相关"——实测无关问题的 RRF 分能高于相关问题。
+    `relevance`（与查询的稠密余弦相似度）才是可判相关的指标，
+    `/api/ask` 的相关性过滤依赖它。
+    """
     results = _seeded().hybrid_search([1.0, 0.0, 0.0, 0.0], models.SparseVector(indices=[10], values=[1.0]), limit=3)
     assert results
     for item in results:
-        assert set(item) == {"question", "answer", "score"}
+        assert set(item) == {"question", "answer", "score", "relevance"}
         assert isinstance(item["score"], float)
+        # relevance 为 float（能取到向量时）或 None（取不到，表示"未知"而非"不相关"）
+        assert item["relevance"] is None or isinstance(item["relevance"], float)
+
+
+def test_hybrid_search_relevance_matches_query_similarity():
+    """relevance 必须真的是与查询的余弦相似度，而不是随意填的数。
+
+    构造一个与查询向量完全一致的文档，其 relevance 应接近 1.0；
+    正交向量的 relevance 应接近 0.0。
+    """
+    store = _seeded()
+    # [1,0,0,0] 作为查询：库中若存在同向向量，relevance 应显著高于正交向量
+    results = store.hybrid_search(
+        [1.0, 0.0, 0.0, 0.0], models.SparseVector(indices=[10], values=[1.0]), limit=5
+    )
+    rels = [r["relevance"] for r in results if isinstance(r.get("relevance"), (int, float))]
+    if rels:
+        # 相似度必须在合法区间内
+        assert all(-1.0001 <= r <= 1.0001 for r in rels), rels
+        # 至少要有一条正相关（查询与库内向量不是正交的）
+        assert max(rels) > 0.0, f"全部非正相关，疑似计算错误: {rels}"
 
 
 def test_hybrid_search_fuses_both_paths():

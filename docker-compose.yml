@@ -107,6 +107,48 @@ services:
       retries: 10
       start_period: 60s
 
+  # ---------- 对象存储（MinIO，S3 兼容） ----------
+  #
+  # 用途：存**原始文件**——上传的招标文件、提取出的图片、导出的报告。
+  # 与另外三个服务的分工：
+  #     postgres   结构化业务数据（会话、反馈、8751 行业务表）
+  #     qdrant     向量（RAG 问答知识库）
+  #     neo4j      知识图谱（实体与关系）
+  #     **minio    原始文件与二进制**（上面三个都不适合存大文件）
+  #
+  # ★ 为什么加它（当前缺口）
+  # -------------------
+  # 上传接口（`/api/extract`）此前只把文件读进内存解析、**不落盘**，
+  # 故"上传过的文件"没有任何留档：无法复查解析结果、无法用新解析器重跑、
+  # 也无法把解析出的图片与原文关联。MinIO 补的就是这一环。
+  #
+  # 端口：
+  #   9000  S3 API（应用用它）
+  #   9001  Web 控制台（浏览器用它，用下面这组账号密码登录）
+  minio:
+    image: minio/minio:latest
+    container_name: bid-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      # 用户名最少 3 位、密码最少 8 位；实际值在 .env（.env.example 留空）
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      # 时区：让日志时间戳与本地一致，便于与后端日志对照
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      # MinIO 自带健康端点。用 curl 而非 wget —— minio 官方镜像里没有 wget
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
 volumes:
   # postgres 复用现有命名卷（含已导入的 8751 行数据），external 表示已存在、不自动创建
   postgres_data:
@@ -118,3 +160,5 @@ volumes:
     name: bid_neo4j_logs
   qdrant_data:
     name: bid_qdrant_data
+  minio_data:
+    name: bid_minio_data

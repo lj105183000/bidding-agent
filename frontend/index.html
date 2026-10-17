@@ -2,8 +2,34 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/logo.svg" />
+    <!--
+      站点图标用品牌自绘 logo。原来指向 Vite 默认的 `vite.svg` ——
+      浏览器标签页上是 Vite 的标志，与本产品无关。
+
+      该文件**同时**被 `src/components/BrandLogo.tsx` 以 `?raw` 读入，
+      用于侧栏与移动端顶栏的品牌标识。**单一数据源**：
+      改 logo 只需改 `public/logo.svg` 一处，favicon 与页面标识不会脱节。
+    -->
+    <!--
+      移动端 viewport：
+        width=device-width   按设备宽度排版（不加会在手机上渲染成 980px 再缩小）
+        initial-scale=1      禁止初始缩放
+        viewport-fit=cover   让页面延伸到刘海/圆角区域，配合 env(safe-area-inset-*)
+                             使用。不加则底部导航会被 iPhone 的 Home 指示条压住。
+      刻意**不设** maximum-scale / user-scalable=no：
+        那会禁用双指缩放，是无障碍缺陷（WCAG 1.4.4 要求可放大到 200%）。
+        表单输入的字号问题用 CSS 的 font-size:16px 解决，不靠禁止缩放。
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <!-- 移动端浏览器地址栏配色，与顶部栏一致，避免滚动时出现突兀色带 -->
+    <meta name="theme-color" content="#ffffff" />
+    <!-- iOS 添加到主屏后以独立应用方式启动 -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <title>招采智脑 · 大模型驱动的数字智能招投标采购平台</title>
   </head>
   <body>

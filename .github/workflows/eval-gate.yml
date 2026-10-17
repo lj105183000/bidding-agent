@@ -1,0 +1,130 @@
+# 分线评测门禁：**每条评测线一个 job**，谁挂了谁单独红。
+#
+# ★ 位置很要紧：必须在**仓库根**的 `.github/workflows/`
+#   GitHub Actions 只读仓库根，放在 `bidding-agent/.github/` 下
+#   永远不会被执行（这份文件原来就在那里，且未被 git 跟踪）。
+#
+# ★ 为什么单独一个文件（不改 ci.yml）
+# ================================
+# `ci.yml` 只跑单测（纯离线、几十秒）。评测线要连真实服务
+# （Qdrant + LLM），成本与依赖完全不同，混进主 CI 会让"提交即红"
+# 变成常态，久而久之没人看。故拆成独立工作流，**手动触发**。
+#
+# ★ 分线红怎么做到
+# ==============
+# 门禁早已输出"分线结论"，但退出码只有一个（0/1/2）。本工作流用
+# `--suites <线> --gate --fail-on <线>` 把判定范围收窄到**一条线**：
+# 每条线一个 matrix job，于是 GitHub 上直接显示
+# "eval / agent ✅、eval / retrieval ❌、eval / rag ✅"。
+#
+#   实测语义（见 `eval/trend.decide_exit_code` 的文档）：
+#     --fail-on X   只有 X 的未达标/退化会让退出码非零；
+#                   其它线的问题**照常打印**并在 `ignored_suites` 里点名
+#     --allow-fail X  除 X 外都算数（探索线的常见用法）
+#   两者互斥；写错线名会**直接报错**（而不是静默永远绿）。
+#
+# ★ 前置条件（不满足时该线记 NOT_RUN，**不会**让门禁失败）
+# ==================================================
+#   1. 仓库 Secrets：DEEPSEEK_API_KEY、ZHIPU_API_KEY（裁判模型）、
+#      QDRANT_URL、QDRANT_API_KEY
+#   2. 知识库已 ingest（否则检索/RAG 线测的是空库，分数没有意义）
+#   3. 首次运行没有基线 → 只存档并返回 0；第二次起才有得比
+#      （门禁输出里会写"分线基线：rag ⏳ 无基线"并给出建立命令）
+#
+# 需要本地跑同样的东西：
+#   python eval/run_all.py --suites agent --gate --fail-on agent --save
+
+name: Eval Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      suites:
+        description: "要跑的线（逗号分隔；留空=全部）"
+        required: false
+        default: ""
+      save:
+        description: "是否把本次结果存进趋势文件（建立/更新基线）"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ★ 评测工程在 `bidding-agent/` 子目录（仓库根没有 pyproject.toml）。
+  #   这份工作流原先放在 `bidding-agent/.github/workflows/`，那时相对路径
+  #   是 `eval/run_all.py`。移到仓库根后必须显式钉工作目录，
+  #   否则 `uv sync` 在根目录找不到工程直接失败。
+  # 先问运行器"有哪些线"，再据此生成 matrix —— 新增评测线时
+  # 只需改 `eval/run_all.ALL_SUITES`，工作流不用动。
+  plan:
+    name: 评测线清单
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bidding-agent
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: 同步依赖
+        run: uv sync --frozen
+      - id: list
+        name: 取评测线清单
+        run: |
+          SUITES=$(uv run python eval/run_all.py --list-suites | python -c "import json,sys; print(json.dumps(json.load(sys.stdin)['suites']))")
+          echo "matrix={\"suite\":$SUITES}" >> "$GITHUB_OUTPUT"
+          echo "评测线：$SUITES"
+
+  gate:
+    name: "eval / ${{ matrix.suite }}"
+    needs: plan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bidding-agent
+    # 每条线独立失败：一条挂了不影响其它线跑完（这正是"分线红"的意义）
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - name: 同步依赖
+        run: uv sync --frozen
+      # 趋势文件是基线来源，必须跨运行保留；否则每次都"没有基线可比"
+      - name: 恢复趋势文件
+        uses: actions/cache@v4
+        with:
+          path: bidding-agent/eval/trend.jsonl
+          key: eval-trend-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            eval-trend-${{ github.ref_name }}-
+            eval-trend-
+      - name: 跑 ${{ matrix.suite }} 线并门禁
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          QDRANT_URL: ${{ secrets.QDRANT_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          HF_HUB_OFFLINE: "1"
+        run: |
+          uv run python eval/run_all.py \
+            --suites ${{ matrix.suite }} \
+            --gate \
+            --fail-on ${{ matrix.suite }} \
+            --gate-json gate-${{ matrix.suite }}.json \
+            ${{ (github.event.inputs.save == 'true') && '--save' || '' }}
+      - name: 上传门禁决策
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-${{ matrix.suite }}
+          path: bidding-agent/gate-${{ matrix.suite }}.json
+          if-no-files-found: warn

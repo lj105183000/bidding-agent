@@ -1,4 +1,4 @@
-"""ReAct 多轮循环测试：多轮回填 / 轮次上限 / 交错执行顺序 / 失败降级。
+﻿"""ReAct 多轮循环测试：多轮回填 / 轮次上限 / 交错执行顺序 / 失败降级。
 
 mock 约定（开发文档 §9.3）：文件内局部 fake 类；TOOL_EXECUTORS 在
 src.agent.core 与 src.agent.react_loop 有两处模块级绑定，必须同时替换。
@@ -42,9 +42,17 @@ class FakeRAGPipeline:
 
 
 def _install_executors(monkeypatch, mapping, log=None):
-    """同时替换两处 TOOL_EXECUTORS 绑定；log 用于记录执行顺序。"""
+    """同时替换两处 TOOL_EXECUTORS 绑定；log 用于记录执行顺序。
+
+    同时放开**执行侧白名单**：这些测试用 `tool_a` / `tool_b` 这类虚构工具，
+    而真实白名单只允许 BASE/WEB 工具集里的名字。
+    本 helper 的目的是测"执行顺序 / 来源合并"等编排行为，
+    与"哪些工具允许执行"正交——后者由 `test_tool_whitelist.py` 专门覆盖。
+    """
     def make(name, fn):
-        def wrapper(arguments):
+        # 接受 question 形参：_execute_tool 现在会把用户原问题传给执行器
+        # （联网工具据此重排结果并补算相关度）
+        def wrapper(arguments, question=""):
             if log is not None:
                 log.append(name)
             return fn(arguments)
@@ -53,6 +61,12 @@ def _install_executors(monkeypatch, mapping, log=None):
     executors = {name: make(name, fn) for name, fn in mapping.items()}
     monkeypatch.setattr(core_mod, "TOOL_EXECUTORS", executors)
     monkeypatch.setattr(loop_mod, "TOOL_EXECUTORS", executors)
+    # 放开白名单：允许本次映射里的全部名字
+    monkeypatch.setattr(
+        loop_mod.ReActMixin,
+        "_allowed_tool_names",
+        staticmethod(lambda meta: set(mapping)),
+    )
 
 
 def _events_by_type(events, event_type):
@@ -124,7 +138,20 @@ def test_tool_round_limit(monkeypatch):
 
 
 def test_interleaved_execution_order(monkeypatch):
-    # 一次决策输出两个调用：按出现顺序执行，tool_name 记录最后完成者
+    """一次决策输出两个调用：**结果顺序**按决策顺序，执行先后不再保证。
+
+    ★ 契约变更（并行化，2026-10-16）
+    -----------------------------
+    原来这一轮的两个工具是**串行**执行的，故可以断言"执行日志按决策顺序"
+    （`exec_log == ["tool_a", "tool_b"]`）。工具改为**同轮并行**后
+    （实测串行时阶段耗时 = 各工具之和，见 `_execute_tool_batch` 的说明），
+    谁先进入执行函数由线程调度决定 —— 继续断言先后会变成**偶发失败**。
+
+    真正必须保证、且现在仍然成立的两条：
+      ① 回填给模型/上报的结果顺序 = 决策顺序（父线程按原顺序展开）
+      ② `tool_name` 仍是"决策顺序里最后一个成功的"
+    并行只会缩短等待，不该改变任何对外可见的顺序。
+    """
     decision = (
         '{"name": "tool_a", "arguments": {"q": "1"}}\n'
         '{"name": "tool_b", "arguments": {"q": "2"}}'
@@ -138,9 +165,16 @@ def test_interleaved_execution_order(monkeypatch):
     agent = BiddingAgent(llm_client=fake)
 
     events = list(agent._chat_events("查一下"))
+    done = _done(events)
 
-    assert exec_log == ["tool_a", "tool_b"]
-    assert _done(events)["tool_name"] == "tool_b"
+    # 两个工具各执行一次（顺序不保证，但**不能**多也不能少）
+    assert sorted(exec_log) == ["tool_a", "tool_b"]
+    # ① 结果顺序 = 决策顺序（tool_call_names 与 tool_timings 都在父线程按原顺序写入）
+    assert done["tool_names"] == ["tool_a", "tool_b"]
+    assert [t["name"] for t in done["tool_timings"]] == ["tool_a", "tool_b"]
+    assert [t["round"] for t in done["tool_timings"]] == [1, 1]
+    # ② 最后一个成功的仍是决策顺序里的最后一个
+    assert done["tool_name"] == "tool_b"
 
 
 def test_tool_failure_degrades_without_crash(monkeypatch):

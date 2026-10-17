@@ -109,13 +109,50 @@ class TestRRFParams:
     @pytest.mark.parametrize(
         "cat, expected_keys",
         [
-            (QuestionCategory.KEYWORD, {"rrf_k", "prefetch_limit", "top_k"}),
-            (QuestionCategory.SENTENCE, {"rrf_k", "prefetch_limit", "top_k"}),
-            (QuestionCategory.CITATION, {"rrf_k", "prefetch_limit", "top_k"}),
+            (QuestionCategory.KEYWORD,
+             {"rrf_k", "prefetch_limit", "top_k", "dense_weight", "sparse_weight"}),
+            (QuestionCategory.SENTENCE,
+             {"rrf_k", "prefetch_limit", "top_k", "dense_weight", "sparse_weight"}),
+            (QuestionCategory.CITATION,
+             {"rrf_k", "prefetch_limit", "top_k", "dense_weight", "sparse_weight"}),
         ],
     )
     def test_params_have_required_keys(self, cat, expected_keys):
+        """每类必须同时给出 k 与**双路权重**。
+
+        权重是本次新增的可调维度：`k` 只调"排名衰减速度"，
+        无法表达"这一路整体不重要"（见 docs/39）。
+        """
         assert set(RRF_PARAMS[cat].keys()) == expected_keys
+
+    @pytest.mark.parametrize("cat", list(QuestionCategory))
+    def test_weights_are_normalized(self, cat):
+        """权重之和为 1，且都非负。
+
+        归一化后只表达"相对倚重"，绝对值无意义——但**和为 1** 让配置可读，
+        也避免有人误以为要凑成 100。
+        """
+        params = RRF_PARAMS[cat]
+        dw, sw = params["dense_weight"], params["sparse_weight"]
+        assert dw >= 0 and sw >= 0, f"{cat} 权重不能为负"
+        assert abs(dw + sw - 1.0) < 1e-6, f"{cat} 权重之和应为 1，实际 {dw + sw}"
+
+    def test_keyword_leans_sparse_and_sentence_leans_dense(self):
+        """★ 权重的**领域先验**：关键词靠精确匹配、自然语言靠语义。
+
+        实测（docs/39 v3）验证该方向正确：
+        `dense=1.0`（纯稠密）时 keyword 98.3%→93.3%、sentence 73.8%→66.7%
+        **两路都不可丢**，但侧重方向由问法形态决定。
+        """
+        kw = RRF_PARAMS[QuestionCategory.KEYWORD]
+        sent = RRF_PARAMS[QuestionCategory.SENTENCE]
+        assert kw["sparse_weight"] > kw["dense_weight"], "关键词查询应偏 BM25"
+        assert sent["dense_weight"] > sent["sparse_weight"], "自然语言应偏语义"
+
+    def test_citation_weights_are_balanced(self):
+        """法条引用：条文编号（关键词）与条文语义同等重要。"""
+        cit = RRF_PARAMS[QuestionCategory.CITATION]
+        assert cit["dense_weight"] == cit["sparse_weight"]
 
     def test_keyword_has_smallest_rrf_k(self):
         """关键词查询 k 最小：放大 BM25 头部排名优势。"""
@@ -249,12 +286,38 @@ class TestPipelineIntegration:
         assert store.sparse_search.called, "k≠60 应走 sparse_search"
         assert not store.hybrid_search.called, "k≠60 不应走 hybrid_search"
 
-    def test_sentence_question_uses_server_rrf(self):
-        """自然语言 k=60 → 走 Qdrant 内置 hybrid_search。"""
-        pipeline, store = self._make_pipeline()
-        pipeline.search("什么是单一来源采购方式？")  # SENTENCE → rrf_k=60
-        assert store.hybrid_search.called, "k=60 应走 hybrid_search"
-        assert not store.dense_search.called, "k=60 不应走 dense_search"
+    def test_all_categories_use_app_level_rrf(self):
+        """**所有类别统一走应用层融合**（含 k=60 的 SENTENCE）。
+
+        ★ 契约变更说明（实测驱动，见 docs/39）
+        ------------------------------------
+        原契约是"k=60 走 Qdrant 服务端 RRF，其余走应用层"。实测发现
+        **两条路径公式不同**：
+
+            同一候选集、均权 (0.5, 0.5)：
+                服务端分 = 0.02416518   应用层分 = 0.01557765
+                服务端分 = 0.02371674   应用层分 = 0.01389127
+                （比值稳定 ≈1.6，且**同一条记录两边排序不同**）
+
+        即服务端 RRF 的基准 k 不是 60。后果是**同一问题只因分类不同
+        就用不同公式排序**——用户无法解释，调参也失去意义。
+
+        统一到应用层的延迟代价实测为**零**（各 8 次取中位：
+        服务端 435.2ms / 应用层 434.7ms，1.00x），因为每次搜索的固定成本
+        远大于一次本地往返。故统一走应用层，换来公式可控与结果可复现。
+        """
+        for question in (
+            "单一来源采购",                        # KEYWORD  k=20
+            "什么是政府采购的单一来源采购方式？",     # SENTENCE k=60
+            "政府采购法第三十一条",                  # CITATION k=40
+        ):
+            pipeline, store = self._make_pipeline()
+            pipeline.search(question)
+            assert store.dense_search.called, f"{question} 应走 dense_search"
+            assert store.sparse_search.called, f"{question} 应走 sparse_search"
+            assert not store.hybrid_search.called, (
+                f"{question} 不应再走服务端 hybrid_search（公式与 fuse_rrf 不一致）"
+            )
 
     def test_citation_question_uses_app_level_rrf(self):
         """法条引用 k≠60 → 走应用层 RRF。"""
@@ -264,12 +327,44 @@ class TestPipelineIntegration:
         assert store.sparse_search.called
         assert not store.hybrid_search.called
 
-    def test_prefetch_limit_passed_to_hybrid_search(self):
-        """SENTENCE 的 prefetch_limit（40）应传给 hybrid_search。"""
-        pipeline, store = self._make_pipeline()
-        pipeline.search("什么是单一来源采购方式？")
-        _, kwargs = store.hybrid_search.call_args
-        assert kwargs.get("prefetch_limit") == RRF_PARAMS[QuestionCategory.SENTENCE]["prefetch_limit"]
+    def test_prefetch_limit_passed_to_dense_sparse_search_all(self):
+        """各类别的 prefetch_limit 都应传给 dense_search / sparse_search。"""
+        for question, category in (
+            ("单一来源采购", QuestionCategory.KEYWORD),
+            ("什么是政府采购的单一来源采购方式？", QuestionCategory.SENTENCE),
+            ("政府采购法第三十一条", QuestionCategory.CITATION),
+        ):
+            pipeline, store = self._make_pipeline()
+            pipeline.search(question)
+            expected = RRF_PARAMS[category]["prefetch_limit"]
+            _, d_kwargs = store.dense_search.call_args
+            _, s_kwargs = store.sparse_search.call_args
+            assert d_kwargs.get("limit") == expected, f"{category} dense"
+            assert s_kwargs.get("limit") == expected, f"{category} sparse"
+
+    def test_weights_and_k_passed_to_fuse_rrf(self):
+        """★ 权重必须透传到融合层——否则「可调」只是写在配置里。
+
+        分类器给出每类的权重与 k，`_hybrid_retrieve` 要把它交给 `fuse_rrf`。
+        漏传的话改了配置排序也不变，且**不报错**（静默失效）。
+        """
+        from unittest.mock import patch
+
+        from src.rag import pipeline as pipeline_mod
+
+        for question, category in (
+            ("单一来源采购", QuestionCategory.KEYWORD),
+            ("什么是政府采购的单一来源采购方式？", QuestionCategory.SENTENCE),
+        ):
+            pipeline, _store = self._make_pipeline()
+            with patch.object(
+                pipeline_mod, "fuse_rrf", wraps=pipeline_mod.fuse_rrf
+            ) as spy:
+                pipeline.search(question)
+            kwargs = spy.call_args.kwargs
+            assert kwargs.get("k") == RRF_PARAMS[category]["rrf_k"], category
+            assert kwargs.get("dense_weight") == RRF_PARAMS[category]["dense_weight"]
+            assert kwargs.get("sparse_weight") == RRF_PARAMS[category]["sparse_weight"]
 
     def test_prefetch_limit_passed_to_dense_sparse_search(self):
         """KEYWORD 的 prefetch_limit 应传给 dense_search / sparse_search。"""

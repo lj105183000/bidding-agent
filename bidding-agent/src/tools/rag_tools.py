@@ -94,6 +94,10 @@ _TEXT_PG_DOWN = "业务数据库暂时不可用，已跳过该数据源。"
 _TEXT_WEB_NO_KEY = "未配置联网搜索密钥（TAVILY_API_KEY），联网搜索不可用。"
 _TEXT_WEB_FAILED = "联网搜索暂时不可用，请稍后重试。"
 _TEXT_WEB_EMPTY = "联网没有搜到相关结果。"
+# 智谱中文联网搜索（第二路搜索数据源，与 Tavily 互补）
+_TEXT_WEB_CN_NO_KEY = "未配置中文联网搜索密钥（ZHIPU_API_KEY），中文联网搜索不可用。"
+_TEXT_WEB_CN_FAILED = "中文联网搜索暂时不可用，请稍后重试。"
+_TEXT_WEB_CN_EMPTY = "中文联网没有搜到相关结果。"
 _TEXT_EXA_UNAVAILABLE = "语义联网搜索（Exa）暂未就绪，已跳过该数据源；如需时效性信息请改用关键词联网搜索。"
 _TEXT_EXA_FAILED = "语义联网搜索暂时不可用，请稍后重试。"
 _TEXT_EXA_EMPTY = "语义联网搜索没有返回结果。"
@@ -373,6 +377,21 @@ def _fmt_rag(items, limit: int = RAG_DEFAULT_TOP_K) -> str:
     同时把整体匹配度写进文本：`src/agent/react_loop.py` 的 `_validate_result` 只有
     图谱 / 业务库 / 联网三个质量标签分支，没有 RAG 的；在不改动他人文件的前提下，
     由格式化器自己给出提示，用户才知道这批资料是否值得引用。
+
+    ★ 相关度必须用 `relevance`，不是 `score`（实测踩坑）
+    --------------------------------------------------
+    原先这里用 `score`，并按 `平均 >= 0.5` 打「匹配度良好，可直接引用」的标签。
+    但 `score` 是 **RRF 融合分**，只反映候选内排名——项目自己的注释写着：
+
+        「RRF 只反映候选内排名，**任何查询都会有第一名**，
+          实测无关问题的 RRF 分（最高 0.500）能高于相关问题（最低 0.081）」
+
+    实测后果：一个明明检索良好的问题，工具返回的文本里写着「相关度：0.10」，
+    并按 0.10 < 0.5 打上「匹配度一般，请结合其他信息判断」。
+
+    **模型据此判断"这批资料不可靠"，而实际上资料是对的**——
+    这是把质量信号喂反了，比不给信号更糟。
+    与此同时，真正可判相关的 `relevance`（同一批数据实测 0.69）被整个丢弃。
     """
     blocks = []
     scores = []
@@ -385,22 +404,48 @@ def _fmt_rag(items, limit: int = RAG_DEFAULT_TOP_K) -> str:
         answer = _as_text(item.get("answer"))
         if not question and not answer:
             continue
+        # 优先 relevance（稠密余弦，可判相关）；没有时才回落到 score
+        relevance = _norm_score(item.get("relevance"))
         score = _norm_score(item.get("score"))
-        if score is not None:
-            scores.append(score)
+        shown = relevance if relevance is not None else score
+        if shown is not None:
+            scores.append(shown)
         lines = [f"[{len(blocks) + 1}] 问：{_truncate(question, FIELD_TRUNCATE_CHARS)}"]
         lines.append(f"    答：{_truncate(answer, ANSWER_TRUNCATE_CHARS)}")
-        if score is not None:
-            lines.append(f"    相关度：{score:.2f}")
+        if shown is not None:
+            # 标出口径：两种分数量纲不同，不标会让模型拿它们互相比较
+            label = "相关度" if relevance is not None else "排名分(不可判相关)"
+            lines.append(f"    {label}：{shown:.2f}")
         blocks.append("\n".join(lines))
 
     if not blocks:
         return _TEXT_RAG_EMPTY
 
     header = f"知识库检索到 {len(blocks)} 条相关资料："
-    if scores:
-        average = sum(scores) / len(scores)
-        header += "（匹配度良好，可直接引用）" if average >= 0.5 else "（匹配度一般，请结合其他信息判断）"
+    # 只有拿到 relevance 时才敢下"匹配度良好"的结论——RRF 分不支持这个判断
+    usable = [
+        _norm_score(i.get("relevance"))
+        for i in (items[:limit] if isinstance(items, list) else [])
+        if isinstance(i, dict)
+    ]
+    usable = [x for x in usable if x is not None]
+    if usable:
+        # 延迟导入：本模块顶层的注释写明「顶层 import `src.rag` 会让整个
+        # TOOL_EXECUTORS 构造失败，五个工具一起消失」，故阈值也按同样口径取。
+        try:
+            from src.rag.vector_store import MIN_RELEVANCE
+
+            threshold = float(MIN_RELEVANCE)
+        except Exception:  # pragma: no cover - src.rag 不可用时仍有合理默认
+            threshold = 0.5
+        average = sum(usable) / len(usable)
+        header += (
+            "（匹配度良好，可直接引用）"
+            if average >= threshold
+            else "（匹配度一般，请结合其他信息判断）"
+        )
+    elif scores:
+        header += "（仅有序分，无法判断相关性）"
     return _finalize(header + "\n" + "\n".join(blocks))
 
 
@@ -572,6 +617,87 @@ def _fmt_web(answer: str, items, limit: int = WEB_DISPLAY_LIMIT) -> str:
 # 联网结果重排
 # --------------------------------------------------------------------------
 
+# 引擎分低于此值时视为「不可信」，改用余弦分覆盖。
+#
+# 实测依据：Tavily 对中文问题给出的引擎分常在 0.0001 量级，
+# 而同一批结果用余弦补算是 0.59~0.73（差三个数量级）。
+# 0.0001 不是「不相关」的表达，而是引擎语言适配不佳的表现；
+# 显示给用户会让人以为「这些结果全都不相关」而放弃查看。
+_ENGINE_SCORE_DOWNGRADE_BELOW = 0.05
+
+
+def _backfill_cosine_scores(question: str, records: list, force: bool = False) -> list:
+    """给联网结果补算与问题的余弦相似度。
+
+    ★ 字段名有两种形态，必须都认（实测踩坑）
+    ----------------------------------------
+    本函数在 `_rerank_web_results` 的**早退分支**里被调用，那时 records 还是
+    **搜索引擎的原样输出**，不是 `_web_sources` 转换后的形状：
+
+        搜索引擎原样（Tavily / 智谱）:  title / content / score / url
+        `_web_sources` 转换后:          question / answer / score / url
+
+    第一版只读 `answer`，而智谱的正文在 `content` 里 → 条件 `r.get("answer")`
+    恒为空 → **整批记录被跳过、分数永远补不上**（前端显示"无分数"）。
+    而我当时的单元测试用 `answer` 做输入，恰好掩盖了这个 bug。
+
+    故这里 `content` 与 `answer` 都读。
+
+    ★ 为什么默认覆盖引擎分（`force=False` 也有条件覆盖）
+    ------------------------------------------------
+    两条数据源的分数口径实测差异极大：
+
+        智谱    **完全不返回分数**
+        Tavily  返回引擎分，但**对中文问题常低到 0.0001**
+                （同一批结果走余弦补算是 0.59~0.73，差三个数量级）
+
+    0.0001 这种值不是"不相关"的表达，而是引擎对该语言不适配的表现。
+    把它显示给用户会让人以为"这些结果全都不相关"，从而放弃查看——
+    而实际上里面可能有高度相关的内容。
+
+    故策略是：**优先用余弦分**（与本地知识库同量纲、口径一致、可解释），
+    余弦算不出来时才保留引擎分作为兜底。
+
+    `force=True` 时忽略已有的 `score` 一律重算；平时只在
+    `score` 为空**或小得不可信**（`_ENGINE_SCORE_DOWNGRADE_BELOW`）时才覆盖。
+
+    失败时原样返回：算不出分数不能影响搜索结果本身。
+    """
+    def _body(record: dict) -> str:
+        """取正文：兼容搜索引擎原样字段（content）与转换后字段（answer）。"""
+        return _as_text(record.get("content")) or _as_text(record.get("answer"))
+
+    def _needs_score(record: dict) -> bool:
+        if not _body(record):
+            return False
+        current = record.get("score")
+        if current is None:
+            return True
+        if force:
+            return True
+        # 引擎分小得不可信 → 用余弦覆盖（见 docstring 说明）
+        return isinstance(current, (int, float)) and current < _ENGINE_SCORE_DOWNGRADE_BELOW
+
+    targets = [r for r in records if _needs_score(r)]
+    if not targets or not _as_text(question):
+        return records
+
+    try:
+        # 函数内导入：src.services 依赖较多，未就绪时不应让联网工具整体不可用
+        from src.services.web_fallback import _score_by_cosine
+
+        scores = _score_by_cosine(question, [_body(r) for r in targets])
+    except Exception:
+        logger.info("联网结果补算相关度失败，保持原样（不影响搜索）", exc_info=True)
+        return records
+
+    for record, score in zip(targets, scores):
+        if isinstance(score, (int, float)):
+            record["score"] = round(float(score), 4)
+            # 内部标记，供 `_web_sources` 归类分数口径（下划线前缀，不进最终 payload）
+            record["_score_kind"] = "cosine"
+    return records
+
 
 def _rerank_web_results(question: str, items, top_k=None):
     """用精排模型按用户问题给联网结果打分并降序排列。
@@ -591,12 +717,14 @@ def _rerank_web_results(question: str, items, top_k=None):
     records = [dict(item) for item in items if isinstance(item, dict)] if isinstance(items, list) else []
     if len(records) < 2:
         # 只有一条时排序没有意义，直接原样返回；此时沿用引擎分（Tavily 的相关度本就是 0-1），
-        # 不要自作主张改成 1.0——那会把"引擎认为它不太相关"伪装成满分
-        return records
+        # 不要自作主张改成 1.0——那会把"引擎认为它不太相关"伪装成满分。
+        # 但**没有分数**的要补算，否则前端显示"无分数"（智谱恒无分）
+        return _backfill_cosine_scores(question, records)
 
     question = _as_text(question)
     if not question:
         # 没有可对照的问题就无从重排，保持引擎顺序与引擎分
+        # （补算也需要问题，故这里不补）
         return records
 
     try:
@@ -606,7 +734,28 @@ def _rerank_web_results(question: str, items, top_k=None):
         from src.rag import reranker
     except Exception:
         logger.info("精排模块尚未就绪，联网结果保持引擎顺序")
-        return records
+        return _backfill_cosine_scores(question, records)
+
+    # 只在模型**已经加载好**时才精排（非阻塞探测，见 Reranker.loaded）。
+    #
+    # 为什么必须加这道闸：`reranker.rerank()` 会触发懒加载，而该模型权重 1.1GB、
+    # 首次加载实测约 80 秒，且是同步阻塞的。原先联网搜索无条件调用它，
+    # 于是用户打开「联网搜索」后的第一次提问会**卡 80 秒**，看起来像服务挂了。
+    #
+    # 取舍依据：联网搜索结果条数少（默认 5~10 条），且搜索引擎本身已按相关性排序，
+    # 精排在此处是"锦上添花"而非必需。让可选优化阻塞主流程，是把增益当成了硬依赖。
+    # 后端启动时会用后台线程预热该模型（api/server.py 的 _preload_models），
+    # 预热完成后本函数会自动开始精排，无需任何配置改动。
+    #
+    # `getattr(..., True)` 的双重语义很关键，别简化成 `not reranker.loaded`：
+    #   - 真实精排器有 loaded 属性 → 未加载时跳过（本次修复的目标）
+    #   - 测试注入的替身没有该属性 → 默认 True，照常走精排逻辑（否则测试会被误跳过）
+    # 这样闸门只对真实实现生效，不改变既有可注入性契约。
+    if not getattr(reranker, "loaded", True):
+        # ★ 这条是最常走到的分支（精排模型 1.1GB，未预热完成时一直走这里）。
+        # 原样返回会让智谱结果永远没有分数，故必须补算余弦分。
+        logger.info("精排模型尚未就绪，联网结果按引擎顺序返回并补算相关度（后台预热中）")
+        return _backfill_cosine_scores(question, records)
 
     # `_idx` 是回填锚点：对方用 `dict(item)` 造副本，对象身份会丢，只能靠自己塞的键认回来。
     # 配对文本给"标题 + 正文"而不是只给标题——招投标网页的标题常常只有项目名，
@@ -632,7 +781,7 @@ def _rerank_web_results(question: str, items, top_k=None):
         scored.append((index, _norm_score(entry.get("score"))))
     if not scored:
         logger.warning("精排返回的形状无法识别，保留引擎顺序")
-        return records
+        return _backfill_cosine_scores(question, records)
 
     # 自己再排一次，不吃对方"已降序"的承诺。没有分数的排到最后——它不等于 0 分，
     # 排到"确实不相关"前面会误导；同分按下标稳定排序，保证同一批结果每次顺序一致
@@ -654,7 +803,22 @@ def _rerank_web_results(question: str, items, top_k=None):
 
 
 def _rag_sources(items) -> list[dict]:
-    """知识库来源：`{question, answer, score}`（见 docs/开发文档.md §6.2）。"""
+    """知识库来源：`{question, answer, score, relevance}`。
+
+    ★ `relevance` 必须带上（实测缺陷修复）
+    ------------------------------------
+    原先只输出 `{question, answer, score}`，把 `relevance` 丢了。后果是
+    **前端与 Agent 的质量判断都拿不到可判相关的分数**：
+
+        `pipeline.search` 实测返回  relevance=0.691（可判相关）
+        `_rag_sources` 转换后      relevance 丢失，只剩 score=0.095（RRF 排名分）
+
+    前端「参考来源」面板因此只能显示一个无意义的 0.10，
+    `_validate_result` 对 RAG 来源也无从判断质量。
+
+    这是**有意的契约增量**——与 `_web_sources` 输出 `score_kind` 同理：
+    少了它，下游无法区分"这条到底相不相关"，只能看到一个"总会有第一名"的排名分。
+    """
     sources = []
     for item in items if isinstance(items, list) else []:
         if not isinstance(item, dict):
@@ -663,15 +827,23 @@ def _rag_sources(items) -> list[dict]:
         answer = _as_text(item.get("answer"))
         if not question and not answer:
             continue
-        sources.append({"question": question, "answer": answer, "score": _norm_score(item.get("score"))})
+        sources.append({
+            "question": question,
+            "answer": answer,
+            "score": _norm_score(item.get("score")),
+            "relevance": _norm_score(item.get("relevance")),
+        })
     return sources
 
 
 def _web_sources(items) -> list[dict]:
     """联网来源：`{question, answer, score, url}`。
 
-    `question` 承载标题（跨轮去重键是 `(question, answer, url)`，见 `react_loop._merge_sources`），
-    **严格只放这四个键**——前端与 eval 若按元素精确比较，多一个键就会失配。
+    `question` 承载标题（跨轮去重键是 `(question, answer, url)`，见 `react_loop._merge_sources`）。
+
+    字段：`question`（标题）/ `answer`（正文）/ `score` / `url` / `score_kind`。
+    `score_kind`（`engine` 引擎自带 / `cosine` 本地补算）是**有意的增量**：
+    两种口径不可直接横比，前端要据此提示用户。
     """
     sources = []
     for item in items if isinstance(items, list) else []:
@@ -681,12 +853,17 @@ def _web_sources(items) -> list[dict]:
         title = _as_text(item.get("title"))
         if not url and not title:
             continue
+        # 分数口径：余弦补算的与本地知识库同量纲可比；引擎分的口径不同。
+        # 这个字段是**有意的增量**：前端要据此提示「不可直接横比」，
+        # 不标的话用户会拿 0.0001 的引擎分与 0.71 的本地匹配度比较而得出错误结论。
+        kind = item.get("_score_kind") or "engine"
         sources.append(
             {
                 "question": title or url,
                 "answer": _as_text(item.get("content")),
                 "score": _norm_score(item.get("score")),
                 "url": url,
+                "score_kind": kind,
             }
         )
     return sources
@@ -711,7 +888,41 @@ def search_knowledge_base(arguments: dict, question: str = "") -> tuple[str, lis
         return _TEXT_RAG_UNAVAILABLE, []
     try:
         # 关键字传 top_k：成员 B 的签名是 search(question, top_k=5)
-        items = pipeline.search(query, top_k=top_k)
+        #
+        # ★ 模型只给了 `query` 时，把带历史的检索提示拼进去（多轮指代消解）
+        # ------------------------------------------------------------
+        # 实测：Agent 的决策 LLM 一般能自己改写追问（"公示期多长" →
+        # "依法必须进行招标的项目 招标人应于何时公示中标候选人 公示期多长"），
+        # 但**不保证稳定**——另一例它先跑偏到上一个话题，用了三轮工具调用才修正。
+        #
+        # 拼上"（上文：上一轮问题）"后：改写得好则多几个相关词（无害），
+        # 改写跑偏则有上文兜住，少走弯路。检索相似度实测 0.627 → 0.868。
+        #
+        # 只在 `question` 与 `query` 不同时才需要——两者相同说明模型没给 query，
+        # 此时 `question` 本身已是用户原问题，调用方（Agent）会给带历史的版本。
+        # ★ 走 **search_cached**，不是 search（实测缺陷修复）
+        # -----------------------------------------------
+        # `RAGPipeline.search()` **没有缓存**，`search_cached()` 才有。
+        # RAG 主链路（`pipeline.chat_events`）一直用的是 `search_cached`，
+        # 但**本工具从一开始调的是 `search`**——于是 Agent 路径完全绕过缓存。
+        #
+        # 后果在实测里看得见：同一轮问答中 `search_knowledge_base` 被重复调用
+        # 4~5 次（`docs/36` 记的"打转"），每次都是一次完整的
+        # 编码 + 向量检索 + 融合，而模型给的 query 往往是用户的同一句话。
+        #
+        # 换成 `search_cached` 是**纯收益**：
+        #     · 签名兼容（同样接受关键字 `top_k`），返回类型一致
+        #     · 未命中时行为与 `search` 完全相同
+        #     · 命中时省掉一次编码 + 检索（实测单次约 430ms）
+        #
+        # 缓存失效仍由调用方负责（`clear_search_cache()`），与主链路口径一致——
+        # 见 `search_cached` 的 docstring。
+        if question and _as_text(question) != query:
+            items = pipeline.search_cached(
+                f"{query}（上文：{_as_text(question)}）", top_k=top_k
+            )
+        else:
+            items = pipeline.search_cached(query, top_k=top_k)
     except Exception:
         logger.exception("知识库检索失败：%s", query)
         return _TEXT_RAG_FAILED, []
@@ -742,9 +953,18 @@ def search_knowledge_graph(arguments: dict, question: str = "") -> tuple[str, li
 
     try:
         if query_type == "graph_stats":
-            return _fmt_graph(query_type, client.graph_stats()), []
+            # ★ 透传结构化图表数据（第三个返回值，可选）
+            # 见 `src/agent/chart_data.py`：数字直接取自 `graph_stats()`
+            # 的返回，不经格式化文本，因而不受展示格式变化影响。
+            from src.agent.chart_data import chart_from_graph_stats
+
+            _stats = client.graph_stats()
+            return _fmt_graph(query_type, _stats), [], chart_from_graph_stats(_stats)
         if query_type == "top_traded":
-            return _fmt_graph(query_type, client.top_traded(limit=limit)), []
+            from src.agent.chart_data import chart_from_top_traded
+
+            _rows = client.top_traded(limit=limit)
+            return _fmt_graph(query_type, _rows), [], chart_from_top_traded(_rows)
 
         if not entity:
             return "请提供要查询的实体名称（标的物 / 采购单位 / 供应商 / 地区）。", []
@@ -802,7 +1022,17 @@ def query_database(arguments: dict, question: str = "") -> tuple[str, list[dict]
     if not data:
         status = client.health()
         return (_TEXT_PG_DOWN if not status.get("ok") else _TEXT_PG_EMPTY), []
-    return _fmt_pg(query_type, data), []
+    # ★ 透传结构化图表数据（第三个返回值，可选）
+    #
+    # 为什么在这里产：`data` 是**格式化之前**的原始行，图表数字直接取自它，
+    # 因而不受 `_fmt_amount`（金额→"1.2 万元"）与 `_truncate` 的影响。
+    # 原实现是从 `_fmt_pg` 的**输出文本**里正则解析 —— 格式一改就静默失效，
+    # 而且解析不回来被格式化过的数字。
+    #
+    # 失败路径仍返回二元组：那里没有数据可画，`_execute_tool` 两种长度都接受。
+    from src.agent.chart_data import chart_from_rows
+
+    return _fmt_pg(query_type, data), [], chart_from_rows(data)
 
 
 def _dispatch_pg(client, query_type: str, arguments: dict, keyword: str, limit: int):
@@ -886,6 +1116,61 @@ def search_web(arguments: dict, question: str = "") -> tuple[str, list[dict]]:
     return _fmt_web(payload.get("answer", ""), records), _web_sources(records)
 
 
+def search_web_cn(arguments: dict, question: str = "") -> tuple[str, list[dict]]:
+    """中文联网搜索（智谱 Web Search），与 `search_web`（Tavily）互补。
+
+    为什么要有第二个联网搜索
+    ------------------------
+    两者覆盖面不同，不是替代关系：
+
+        search_web（Tavily）  ：英文语料强、带 AI 摘要；但不返回发布时间
+        search_web_cn（智谱） ：中文站点覆盖好（省市政府采购网、公共资源交易中心），
+                                **每条结果都带 publish_date 与来源媒体**，适合判断时效性
+
+    招投标场景里"这条公告是不是最新的"经常是判断题的关键，而 Tavily 的结果没有日期字段，
+    只能靠正文里碰运气，故引入智谱作为补充数据源。
+
+    实现说明：Tavily 走 `src/web_search.py`，智谱走 `src/web_search_zhipu.py`，
+    两个模块都只负责取数据；格式化与来源构造在本文件里**共用同一套函数**
+    （智谱的返回值已被归一成与 Tavily 同形的字段集，故无需分叉）。
+    """
+    arguments = arguments if isinstance(arguments, dict) else {}
+    query = _as_text(_pick(arguments, "query", "keyword", "q", "text", "search_query", "question")) or _as_text(question)
+    if not query:
+        return _TEXT_MISSING_QUERY, []
+
+    # 延迟导入：与 search_web 同一理由——纯配置问题不应依赖模块能否导入，
+    # 本模块导入失败也不该连带影响其他工具
+    try:
+        from src import web_search_zhipu
+    except Exception:
+        logger.exception("智谱联网搜索模块导入失败")
+        return _TEXT_WEB_CN_FAILED, []
+
+    if not web_search_zhipu.is_configured():
+        return _TEXT_WEB_CN_NO_KEY, []
+
+    max_results = _safe_int(
+        _pick(arguments, "max_results", "maxResults", "limit", "count", "num"), WEB_DEFAULT_MAX_RESULTS, WEB_MAX_RESULTS
+    )
+    engine = _as_text(_pick(arguments, "search_engine", "engine", "depth")) or "search_std"
+
+    try:
+        payload = web_search_zhipu.zhipu_search_client.search(
+            query, max_results=max_results, engine=engine
+        )
+    except Exception:
+        logger.exception("智谱联网搜索失败：%s", query)
+        return _TEXT_WEB_CN_FAILED, []
+
+    items = payload.get("results") if isinstance(payload, dict) else None
+    records = _rerank_web_results(_as_text(question) or query, items)
+    if not records:
+        return _TEXT_WEB_CN_EMPTY, []
+    # answer 传空串：智谱不提供 AI 摘要，_fmt_web 会自动跳过摘要段
+    return _fmt_web(payload.get("answer", ""), records), _web_sources(records)
+
+
 def search_exa(arguments: dict, question: str = "") -> tuple[str, list[dict]]:
     """语义联网搜索（Exa MCP）。
 
@@ -958,8 +1243,122 @@ _PG_QUERY_TYPES = (
 # --------------------------------------------------------------------------
 
 
+#: 追问工具的参数上限。
+#:
+#: ★ 为什么必须设上限
+#: ---------------
+#: 模型很容易一次抛出 5~6 个问题（"您是哪个地区？预算多少？采购方式？
+#: 项目类型？有没有特殊要求？"），用户面对的是一份问卷而不是一次对话。
+#: 3 条以内才像"澄清"，超过就变成"填表"——而填表的转化率极低，
+#: 用户往往直接放弃或随便填，反而比不问更糟。
+MAX_CLARIFY_QUESTIONS = 3
+
+#: 追问工具在工具文本里的固定标记。
+#:
+#: 追问的数据（问题与选项）通过 `arguments` 传给 Agent 层，本执行器**不解析它**。
+#: 这里返回固定文本的理由：
+#:   · 执行器契约是 `(文本, sources, ok)` 三元组（见 `_execute_tool`），
+#:     没有回传结构化数据的通道；把数据塞进文本再解析回来会引入
+#:     "格式化→解析"两条容易漂移的代码。
+#:   · 真的走到这一句，只可能是**模型没按约定传 questions** 的兜底情况，
+#:     此时给出可读文案即可（Agent 层会退化为"不追问，继续正常回答"）。
+CLARIFY_MARKER = "【需要用户澄清】"
+
+
+def ask_clarification(arguments: dict, question: str = "") -> tuple[str, list[dict]]:
+    """追问工具的执行器。
+
+    ★ 这个工具**不检索、不产生来源**，也不该走"工具结果回传给模型"的常规路径。
+    真正的处理在 `react_loop`：模型调用它时**立刻产出 `clarify` 事件并结束本轮**，
+    不再进入检索与生成。见 `react_loop._chat_stream_tools` 里的拦截。
+
+    ★ 为什么执行器仍然要存在（而不是只放个 schema 占位）
+    ------------------------------------------------
+    工具注册表 `TOOL_EXECUTORS` 由 `_all_specs()` 派生，schema 与执行器同源。
+    若只声明 schema 不给执行器，`TOOL_EXECUTORS.get("ask_clarification")` 为 None，
+    任何**绕过拦截**的路径（测试直接调 `_execute_tool`、模型在后续轮次调用）
+    都会拿到"工具暂不可用（未注册或后端未就绪）"——
+    那会让模型以为工具坏了并重试，而不是察觉"这轮不该追问"。
+    """
+    raw = arguments.get("questions") if isinstance(arguments, dict) else None
+    items: list[str] = []
+    if isinstance(raw, list):
+        for item in raw[:MAX_CLARIFY_QUESTIONS]:
+            if isinstance(item, str):
+                text = item.strip()
+            elif isinstance(item, dict):
+                text = str(item.get("question") or "").strip()
+            else:
+                text = ""
+            if text:
+                items.append(text)
+    if not items:
+        return (
+            f"{CLARIFY_MARKER}（未提供问题，本次不追问，按已有信息回答）",
+            [],
+        )
+    joined = "；".join(items)
+    return f"{CLARIFY_MARKER} {joined}", []
+
+
 # 每个工具的执行器与元信息声明在一处，避免"加了工具忘了注册"或两处参数名漂移
 _TOOL_SPECS = (
+    {
+        # ★ 追问工具放在**第一位**：它是纯交互动作、不产生外部请求，
+        # 且决策轮里"该不该先问清楚"应当先于"检索什么"被考虑。
+        # （实测：放在列表末尾时，模型更容易直接选检索工具——
+        #   工具顺序对选择概率有影响，虽非决定性。）
+        "name": "ask_clarification",
+        "description": (
+            "当用户问题**指向其自身项目/单位的具体情形**、但缺少作出判断所必需的关键信息时，"
+            "用本工具向用户追问，**不要靠猜测检索**。"
+            "判断口径：\n"
+            "  · 适用：问题含『我们/我这个项目/本公司』等自身指向，"
+            "或需要地区、采购方式、项目类型、金额区间等前提才能给结论。"
+            "例：『我们这个项目可以单一来源采购吗？』（缺项目性质与地区）\n"
+            "  · 不适用：通用法规与流程类问题，知识库本身就能回答，**应当直接检索**。"
+            "例：『单一来源采购的适用条件是什么？』『投标保证金比例上限是多少？』\n"
+            "  · 不适用：问题已足够具体（含明确的地区/方式/对象），直接检索。\n"
+            "★ 只问**确实缺失且会改变结论**的信息，最多 3 条，一次问完；"
+            "能从问题本身推断的信息不要问。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "maxItems": MAX_CLARIFY_QUESTIONS,
+                    "description": "要追问的问题，最多 3 条，按重要性排序",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "question": {
+                                "type": "string",
+                                "description": "问题正文，一句话，具体到能直接回答",
+                            },
+                            "options": {
+                                "type": "array",
+                                "maxItems": 5,
+                                "description": (
+                                    "可选的候选项。当答案可以枚举时给出（如采购方式、地区），"
+                                    "前端会渲染成可点选的按钮，比让用户手打更快更准；"
+                                    "答案开放时（如金额）省略本字段"
+                                ),
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": ["question"],
+                    },
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "一句话说明为什么必须问清楚（会展示给用户，便于其理解）",
+                },
+            },
+            "required": ["questions"],
+        },
+        "executor": ask_clarification,
+    },
     {
         "name": "search_knowledge_base",
         "description": "招投标问答知识库（政策法规、办理流程、常见问题），优先使用",
@@ -1056,6 +1455,33 @@ _TOOL_SPECS = (
         "executor": search_web,
     },
     {
+        "name": "search_web_cn",
+        "description": (
+            "中文联网搜索（智谱）：覆盖省市政府采购网、公共资源交易中心等中文站点，"
+            "每条结果带【发布时间】与来源媒体，适合查国内招标公告、政策通知与时效性信息"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "中文搜索关键词，尽量带上地区、年份或项目类型"
+                        "（如「2025年 安徽 政府采购 招标公告」）"
+                    ),
+                },
+                "max_results": {"type": "integer", "description": "返回条数，默认 5，上限 10"},
+                "search_engine": {
+                    "type": "string",
+                    "enum": ["search_std", "search_pro", "search_pro_sogou", "search_pro_quark"],
+                    "description": "搜索档位：search_std 快而省（默认）；结果不足时用 search_pro",
+                },
+            },
+            "required": ["query"],
+        },
+        "executor": search_web_cn,
+    },
+    {
         "name": "search_exa",
         "description": "联网语义搜索（开放性、研究类问题）",
         "parameters": {
@@ -1098,22 +1524,93 @@ def _build_tool(spec: dict) -> BaseTool:
     return _Tool(name=spec["name"], description=spec["description"], parameters=spec["parameters"])
 
 
-# 工具定义清单（供 API 层列出工具、ToolRunner 做参数校验）
-TOOLS: list[BaseTool] = [_build_tool(spec) for spec in _TOOL_SPECS]
+# 工具定义清单（供 API 层列出工具、ToolRunner 做参数校验）。
+#
+# ⚠️ 位置**必须**在 `_all_specs()` 定义之后——模块级赋值是立即求值的，
+# 放在前面会 `NameError: _all_specs is not defined`，且是**导入期**报错，
+# 会让所有依赖本模块的测试在 collection 阶段就挂掉（实测 13 个测试文件）。
+# 见文件末尾的 `TOOLS = ...`。
 
 # 冻结契约：工具名 → 执行器。键名必须与 src/agent/constants.py 的
 # BASE_TOOL_NAMES + WEB_TOOL_NAMES 完全一致（src/agent/core.py 与
 # src/agent/react_loop.py 各持一份模块级绑定，只读 .get(name) / list(...)）。
 # 五个键**无条件注册**：模块缺失时由执行器给出可读的降级文案，
 # 不注册的话上层只会说"工具暂不可用（未注册或后端未就绪）"，分不清是哪一路没通。
-TOOL_EXECUTORS = {spec["name"]: spec["executor"] for spec in _TOOL_SPECS}
+def _all_specs() -> tuple:
+    """全部工具 spec：检索类（本模块）+ 规则判定类（compliance_tools）。
+
+    ★ 为什么要合并而不是各建一个注册表
+    ---------------------------------
+    
+eact_loop._resolve_tool_schemas 只读一处 get_tool_schemas。
+    若合规工具另建注册表，就得改 Agent 层的解析逻辑——
+    而加工具应该是**只改工具层**的事。
+
+    延迟导入：合规工具依赖 services 层，顶层 import 会让
+    services 任何一处缺依赖都把**所有**工具一起打挂（最坏的失败模式，
+    与 _TOOL_SPECS 上方注释是同一考虑）。
+    """
+    specs = list(_TOOL_SPECS)
+    try:
+        from src.tools.compliance_tools import TOOL_SPEC as _compliance_spec
+
+        specs.append(_compliance_spec)
+    except Exception as exc:  # pragma: no cover - 合规工具不可用不影响检索类工具
+        import logging
+
+        logging.getLogger(__name__).warning("合规工具未注册（services 层不可用）: %s", exc)
+    return tuple(specs)
+
+
+TOOL_EXECUTORS = {spec["name"]: spec["executor"] for spec in _all_specs()}
+
+# 工具定义清单（供 API 层列出工具、ToolRunner 做参数校验）。
+#
+# ⚠️ 必须与 `TOOL_EXECUTORS` 用同一个来源（`_all_specs()`），且**位置在它之后**：
+# 模块级赋值是立即求值的，放在 `_all_specs` 定义之前会导入期 NameError，
+# 让所有依赖本模块的测试在 collection 阶段就挂掉（实测 13 个测试文件）。
+TOOLS: list[BaseTool] = [_build_tool(spec) for spec in _all_specs()]
+
+
+def get_tool_schemas(names: "tuple[str, ...] | list[str] | None" = None) -> list[dict]:
+    """产出 OpenAI / DeepSeek function-calling 格式的工具定义。
+
+    用途：Agent 的决策轮需要把「有哪些工具可用」告诉大模型，模型才会返回
+    tool_calls；本函数把 `_all_specs()` 这份唯一事实来源翻译成 API 参数，
+    避免再手写一份 schema 造成两处漂移。
+
+    `names` 为 None 时返回全部工具；传入白名单时只返回其中的
+    （前端"联网搜索"开关关闭时据此只暴露 BASE_TOOL_NAMES）。
+
+    ⚠️ 必须遍历 `_all_specs()` 而不是 `_TOOL_SPECS`。
+    实测踩过：注册表已含合规工具，但本函数仍只遍历检索类的 `_TOOL_SPECS`，
+    于是**工具注册了、schema 却没暴露**——模型看不到它就永远不会调用；
+    而 `TOOL_EXECUTORS` 里查得到，从注册表看一切正常。这类"注册了但没暴露"
+    只能靠断言 schema 列表才能发现。
+    """
+    allowed = set(names) if names is not None else None
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": spec["name"],
+                "description": spec["description"],
+                "parameters": spec["parameters"],
+            },
+        }
+        for spec in _all_specs()
+        if allowed is None or spec["name"] in allowed
+    ]
+
 
 __all__ = [
     "TOOLS",
     "TOOL_EXECUTORS",
+    "get_tool_schemas",
     "search_knowledge_base",
     "search_knowledge_graph",
     "query_database",
     "search_web",
+    "search_web_cn",
     "search_exa",
 ]

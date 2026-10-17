@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 
@@ -24,12 +25,52 @@ DENSE_VECTOR_NAME = "dense"
 SPARSE_VECTOR_NAME = "sparse"
 UPSERT_BATCH = 256
 
+# 判定"检索结果是否真的与该问题相关"的余弦相似度阈值。
+#
+# 标定数据（2026-10-12，本项目 75 条知识库语料）：
+#
+#     口径：每个问题的**最佳结果**（top1）——决定"该不该回答"看的是最佳匹配
+#     相关问题 18 个：最低 0.5806  中位 0.6257  最高 0.7306
+#     无关问题 12 个：最高 0.4256  中位 0.3555  最低 0.2964
+#     >>> 间隔 0.1550，取中点 0.5 留有余量（距两侧各约 0.08）
+#
+# ⚠️ 不要用 `score`（RRF 融合分）代替它做这个判断：RRF 只反映候选内排名，
+# 实测无关问题的 RRF 分（最高 0.500）能超过相关问题（最低 0.081），完全不可用。
+#
+# ⚠️ 语料规模变化后需重新标定：语料从 75 条扩到数千条时，
+# 无关问题的 top1 相似度通常会上移（候选变多，总能撞到一条"看起来像"的），
+# 阈值可能要上调。
+MIN_RELEVANCE = 0.5
+
 _DISTANCE_MAP = {
     "cosine": models.Distance.COSINE,
     "dot": models.Distance.DOT,
     "euclid": models.Distance.EUCLID,
     "manhattan": models.Distance.MANHATTAN,
 }
+
+
+def _cosine(a, b) -> float:
+    """两个等长向量的余弦相似度。
+
+    为什么不用 numpy：这里每次只算 5 条 × 512 维，纯 Python 点积的耗时可忽略
+    （微秒级），而引入 numpy 依赖只为这点计算不划算。项目其他位置也没用 numpy。
+
+    零向量（范数为 0）返回 0.0 而不是抛错或 NaN——向量库里若混入零向量，
+    检索不该因此崩掉；返回 0 表示"无相似性"，语义合理。
+    """
+    if len(a) != len(b):
+        raise ValueError(f"向量维度不一致: {len(a)} vs {len(b)}")
+    dot = 0.0
+    na = 0.0
+    nb = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        na += x * x
+        nb += y * y
+    if na <= 0.0 or nb <= 0.0:
+        return 0.0
+    return dot / (math.sqrt(na) * math.sqrt(nb))
 
 
 class VectorStore:
@@ -125,13 +166,57 @@ class VectorStore:
         *,
         limit: int = 5,
         prefetch_limit: int = 30,
+        dense_weight: float = 1.0,
+        sparse_weight: float = 1.0,
+        rrrf_k: int | None = None,
     ) -> list[dict]:
-        """dense + sparse 双路召回 → RRF 融合。
+        """dense + sparse 双路召回 → **加权** RRF 融合（服务端）。
 
-        RRF（Reciprocal Rank Fusion）只看两路的**排名**而不看分数：稠密余弦
-        相似度与 BM25 分值量纲完全不同，直接加权求和需要反复调参，RRF 用
-        `1/(k+rank)` 求和天然规避了归一化问题，是本项目的默认融合策略。
+        ★ 权重与 k（两者独立）
+        -------------------
+            dense_weight / sparse_weight   调"信哪一路"（整体影响力）
+            rrrf_k                          调"多看重头部"（排名衰减速度）
+
+        Qdrant 1.19 的 `Rrf` 模型支持 `weights` 与 `k`：
+            "Weights for each prefetch source. Higher weight gives more influence
+             on the final ranking... The number of weights should match the number
+             of prefetches."
+
+        故服务端能直接做加权融合，无需在应用层重算。
+        **权重顺序必须与 prefetch 顺序一致**——这里是 `[dense, sparse]`。
+
+        ★ `rrrf_k` 传 None 时用 Qdrant 默认
+        ---------------------------------
+        `Rrf(k=None)` 表示用服务端默认（60）。保留该参数是为了让调用方
+        在 k=60 时也能走服务端路径（省一次网络往返）。
+
+        ★ 返回值同时给出 `score` 与 `relevance`，两者含义**不同**，不要混用：
+
+            score      加权 RRF 融合分。只反映"在两路候选中的排名"，取值范围小，
+                       **任何查询都会有第一名**，因此**不能用它判断相关性**。
+            relevance  与查询的稠密余弦相似度（-1~1）。实测相关问 0.67~0.71、
+                       无关问 0.29~0.34，**可以**用来判断"这条到底相不相关"。
+
+        需要判断"检索结果是否真的相关"时必须用 `relevance`（例如
+        `/api/ask` 要避免把无关问答当作答案返回）。
+
+        实现上向量来自 `with_vectors`——与 payload 在同一次查询里取回，
+        不产生额外 IO；计算是本地点积，5 条记录的代价可忽略。
+        之所以不用 `score` 近似，是因为 RRF 分与相似度之间没有单调关系。
         """
+        # 权重与 k 只在非默认时显式构造 `Rrf`，默认路径保持原样
+        # （少传参数 = 少一处与服务端默认值耦合）。
+        use_explicit = (dense_weight != 1.0 or sparse_weight != 1.0 or rrrf_k is not None)
+        if use_explicit:
+            fusion = models.RrfQuery(
+                rrf=models.Rrf(
+                    weights=[dense_weight, sparse_weight],
+                    k=rrrf_k,
+                )
+            )
+        else:
+            fusion = models.FusionQuery(fusion=models.Fusion.RRF)
+
         response = self.client.query_points(
             collection_name=self.collection,
             prefetch=[
@@ -142,24 +227,121 @@ class VectorStore:
                     query=sparse_vector, using=SPARSE_VECTOR_NAME, limit=prefetch_limit
                 ),
             ],
-            query=models.FusionQuery(fusion=models.Fusion.RRF),
+            query=fusion,
             limit=limit,
             with_payload=True,
         )
-        return [
-            {
-                "question": (p.payload or {}).get("question", ""),
-                "answer": (p.payload or {}).get("answer", ""),
-                "score": float(p.score),
-            }
-            for p in response.points
-        ]
+        points = list(response.points)
+
+        # ★ 向量要单独取：`FusionQuery`（聚合查询）**不会**返回向量，
+        # 即使传了 `with_vectors` 也是 None —— 实测踩过这个坑。
+        # 故对已返回的 top_k 个点做一次定点 retrieve。
+        # 代价很小：只取 limit（默认 5）条，且本地 Qdrant 下是毫秒级；
+        # 集合是 512 维，单条 2KB，5 条共 10KB。
+        vectors = self._fetch_vectors([p.id for p in points])
+        return [self._to_record(p, dense_vector, vectors.get(p.id)) for p in points]
+
+    def _fetch_vectors(self, ids: list) -> dict:
+        """按 id 取回稠密向量。失败时返回空 dict（relevance 会是 None 而非 0）。"""
+        if not ids:
+            return {}
+        try:
+            recs = self.client.retrieve(
+                collection_name=self.collection,
+                ids=ids,
+                with_vectors=[DENSE_VECTOR_NAME],
+                with_payload=False,
+            )
+        except Exception as exc:
+            logger.warning("取回向量失败，relevance 将不可用: %s", exc)
+            return {}
+
+        out: dict = {}
+        for r in recs:
+            vec = r.vector
+            dense = vec.get(DENSE_VECTOR_NAME) if isinstance(vec, dict) else vec
+            if dense is not None:
+                out[r.id] = dense
+        return out
+
+    def attach_relevance(self, records: list[dict], query_vector: list[float]) -> list[dict]:
+        """给检索结果补算 `relevance`（与查询的稠密余弦相似度），就地返回。
+
+        **为什么必须做成公开方法**：`RAGPipeline._hybrid_retrieve` 有两条路径——
+        `rrf_k == 60` 走服务端 `hybrid_search`，否则走
+        `dense_search` + `sparse_search` + 应用层 `fuse_rrf`。
+        实测分类器给出的 `rrf_k` 恒为 20，即**实际总是走应用层那条**，
+        所以只在 `hybrid_search` 里算 relevance 等于写了死代码。
+
+        该方法需要结果里带 `id` 字段才能取向量；没有 id 的记录会保持
+        `relevance=None`（未知，而非"不相关"）。
+
+        ★ 曾尝试在这里省掉一次往返，**测不出收益，已回滚**
+        ------------------------------------------------
+        思路：让 `dense_search` 带 `with_vectors` 把向量一起返回，
+        就不必再 `_fetch_vectors` 往返一次。
+
+        实测**无法证明有效**（同一进程交替 30 轮，配对差值符号检验 p=0.29）：
+
+            A（现状：搜 + _fetch）   中位 1738ms
+            B（优化：搜时带向量）     中位 1520ms
+            配对差值中位 -230ms，但 p25/p75 = -883 / +407ms
+            B 更快的轮次 17/30（约等于抛硬币）
+
+        问题在于**这台机器与 Qdrant 的噪声大于方案差异**——
+        同一操作实测在 208ms 与 2383ms 之间跳动（11 倍）。
+        按"不确定就不改"的原则回滚：多一个内部字段要穿过 `fuse_rrf`
+        再被剥离，复杂度的代价换不到可验证的收益。
+
+        **若日后要重试**：先解决测量稳定性（受控的本地 Qdrant +
+        多次采样取 p25 而非中位），否则同样的结论会重现。
+        """
+        ids = [r.get("id") for r in records if r.get("id") is not None]
+        if not ids:
+            return records
+        vectors = self._fetch_vectors(ids)
+        for r in records:
+            rid = r.get("id")
+            dense = vectors.get(rid) if rid is not None else None
+            if dense is None or not query_vector:
+                r.setdefault("relevance", None)
+                continue
+            try:
+                r["relevance"] = float(_cosine(query_vector, dense))
+            except (TypeError, ValueError, ZeroDivisionError):
+                r.setdefault("relevance", None)
+        return records
+
+    @staticmethod
+    def _to_record(point, query_vector: list[float], dense=None) -> dict:
+        """把 Qdrant 返回的 point 归一成内部记录，并补算 relevance。
+
+        向量可能取不到（聚合查询不返回、或集合结构特殊），此时 `relevance`
+        为 None 而不是 0——**未知与"完全无关"是两回事**，
+        用 0 会让调用方误以为已经算过了。
+        """
+        payload = point.payload or {}
+        relevance = None
+        if dense is not None and query_vector:
+            try:
+                relevance = float(_cosine(query_vector, dense))
+            except (TypeError, ValueError, ZeroDivisionError):
+                relevance = None
+        return {
+            "question": payload.get("question", ""),
+            "answer": payload.get("answer", ""),
+            "score": float(point.score),
+            "relevance": relevance,
+        }
 
     def dense_search(
         self, dense_vector: list[float], *, limit: int = 30
     ) -> list[dict]:
         """单路稠密向量检索。供应用层 RRF（`classify_question.fuse_rrf`）使用——
         当分类器要求非默认 k 值时，需分别取 dense 与 sparse 两路结果自行融合。
+
+        `id` 必须保留：`attach_relevance` 靠它取回向量计算余弦相似度。
+        `fuse_rrf` 用 `dict(payload[key])` 复制记录，故 id 能穿过应用层融合。
         """
         response = self.client.query_points(
             collection_name=self.collection,
@@ -170,6 +352,7 @@ class VectorStore:
         )
         return [
             {
+                "id": p.id,
                 "question": (p.payload or {}).get("question", ""),
                 "answer": (p.payload or {}).get("answer", ""),
                 "score": float(p.score),
@@ -180,7 +363,13 @@ class VectorStore:
     def sparse_search(
         self, sparse_vector: models.SparseVector, *, limit: int = 30
     ) -> list[dict]:
-        """单路稀疏向量（BM25）检索。与 `dense_search` 配对使用。"""
+        """单路稀疏向量（BM25）检索。与 `dense_search` 配对使用。
+
+        同样保留 `id`（理由见 `dense_search`）——不过要注意：BM25 路命中的记录
+        若 dense 路没命中，取回向量后算出的相似度可能偏低，
+        这不代表记录不相关，只是"向量层面不像"。故 relevance 只应与
+        同一路径的结果比较，不要跨路径下结论。
+        """
         response = self.client.query_points(
             collection_name=self.collection,
             query=sparse_vector,
@@ -190,6 +379,7 @@ class VectorStore:
         )
         return [
             {
+                "id": p.id,
                 "question": (p.payload or {}).get("question", ""),
                 "answer": (p.payload or {}).get("answer", ""),
                 "score": float(p.score),

@@ -46,7 +46,39 @@ jobs:
         run: uv sync --frozen
 
       - name: 运行测试
-        run: uv run pytest -q
+        # ★ 加覆盖率与最慢用例，并显式排除 integration
+        #
+        # 三个改动的理由（都是实测咬过人的）：
+        #
+        # `--cov` —— 此前**完全没有覆盖率度量**。实测基线 71%，缺口集中在
+        #   `to_postgresql/to_neo4j/vision`（0%）与 `api/server.py`（36%）。
+        #   **不设 `--cov-fail-under`**：本次只做"让数字可见"，
+        #   定阈值需要先看几轮趋势，否则会变成"为了过门禁而写测试"。
+        #
+        # `--durations=10` —— 一眼看出哪几个用例在拖。实测最慢单个 16s
+        #   （含嵌入模型加载的集成用例）。
+        #   注：它**不能配在 pyproject 的 ini 里**（pytest 会报
+        #   `Unknown config option: durations` 然后静默忽略），只能命令行传。
+        #
+        # `-m "not integration"` —— 本来已由 `addopts` 默认生效，这里**显式写出**
+        #   是为了让 CI 日志里能直接看到这个口径，不必去翻 pyproject。
+        run: |
+          uv run pytest -q \
+            -m "not integration" \
+            --durations=10 \
+            --cov=src --cov=api \
+            --cov-report=term-missing:skip-covered
+
+      # 覆盖率报告存档：失败时也能下载下来看缺口的分布
+      # （`if: always()` —— 测试红了正是最需要看覆盖率的时候）
+      - name: 上传覆盖率报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: bidding-agent/.coverage
+          if-no-files-found: ignore
+          retention-days: 7
 
   frontend:
     name: 前端构建与测试（npm ci + build + vitest）

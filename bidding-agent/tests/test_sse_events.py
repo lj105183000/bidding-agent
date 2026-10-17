@@ -111,9 +111,36 @@ def test_chat_stream_frame_sequence_and_done_frame():
     assert isinstance(done["tool_name"], str)              # tool_name 单字符串语义
 
 
+class _FailingLLM:
+    """决策轮即抛异常，迫使 Agent 走 RAG 降级路径。"""
+
+    def chat_raw(self, messages, tools=None):
+        raise RuntimeError("llm unavailable (test)")
+
+
+class _FailingRAG:
+    """检索即抛异常，使降级路径也失败——这是本测试要覆盖的最终错误分支。"""
+
+    def search(self, question, top_k=5):
+        raise RuntimeError("rag unavailable (test)")
+
+
 def test_chat_stream_error_frame_when_no_backend():
-    # LLM 工厂与 RAG 均不可用：产出 error 帧，不产出 done
-    agent = BiddingAgent(llm_client=None, rag_pipeline=None)
+    """LLM 与 RAG 都不可用时：产出 error 帧，不产出 done。
+
+    **必须显式注入"失败的依赖"，不能靠环境里恰好没有可用后端。**
+    早期实现只传 `llm_client=None, rag_pipeline=None`，那表示"用默认依赖"——
+    Agent 会回落到真实的 LLM 工厂与全局 RAG 单例。于是本测试的结果取决于
+    这台机器上 DeepSeek/Qdrant 是否配好、是否联网：
+
+        - 后端不可用 → 通过（测试原本要覆盖的分支）
+        - 后端可用   → 真的生成一段回答并产出 done 帧 → **测试失败**
+
+    实测踩到过：把 Qdrant 从云端改为本地实例后，检索恢复可用，
+    这个测试就从"通过"变成"失败"，而代码本身没有任何问题。
+    让测试自带失败依赖，才能在任何环境下都验证同一条契约。
+    """
+    agent = BiddingAgent(llm_client=_FailingLLM(), rag_pipeline=_FailingRAG())
 
     frames = list(agent.chat_stream("任何问题"))
     events = _parse_frames(frames)

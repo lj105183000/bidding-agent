@@ -8,15 +8,43 @@ from src.rag.classify_question import QuestionCategory, classify, fuse_rrf, get_
 from src.rag.embedder import BM25Encoder, Embedder, Reranker, embedder, reranker
 from src.rag.ingest import clean_qa, ingest_data, load_qa
 from src.rag.pipeline import RAGPipeline, cache_info, clear_search_cache, rag_pipeline
+from src.rag.regulation_store import (
+    DENSE_VECTOR_NAME,
+    POINT_NAMESPACE,
+    REGULATION_COLLECTION,
+    SPARSE_VECTOR_NAME,
+    RegulationArticle,
+    RegulationError,
+    all_articles,
+    ensure_regulation_collection,
+    point_id,
+    regulation_stats,
+    search_regulations,
+    upsert_regulations,
+    verify_regulations,
+)
 from src.rag.vector_store import VectorStore
 
 __all__ = [
     "BM25Encoder",
+    "DENSE_VECTOR_NAME",
     "Embedder",
+    "POINT_NAMESPACE",
     "QuestionCategory",
     "RAGPipeline",
+    "REGULATION_COLLECTION",
     "Reranker",
+    "RegulationArticle",
+    "RegulationError",
+    "SPARSE_VECTOR_NAME",
     "VectorStore",
+    "all_articles",
+    "ensure_regulation_collection",
+    "point_id",
+    "regulation_stats",
+    "search_regulations",
+    "upsert_regulations",
+    "verify_regulations",
     "cache_info",
     "classify",
     "clean_qa",

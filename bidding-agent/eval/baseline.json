@@ -1,0 +1,35 @@
+{
+  "saved_at": "2026-10-12 22:00:36",
+  "config": {
+    "name": "prompt-default",
+    "top_k": 5,
+    "rerank": false,
+    "prompt_variant": "default"
+  },
+  "cases": 25,
+  "metrics": {
+    "faithfulness": 0.7705,
+    "relevancy": 0.8807,
+    "recall": 1.0
+  },
+  "detail": {
+    "faithfulness": {
+      "mean": 0.7705,
+      "median": 0.875,
+      "min": 0.0,
+      "zeros": 1
+    },
+    "relevancy": {
+      "mean": 0.8807,
+      "median": 0.8944,
+      "min": 0.6844,
+      "zeros": 0
+    },
+    "recall": {
+      "mean": 1.0,
+      "median": 1.0,
+      "min": 1.0,
+      "zeros": 0
+    }
+  }
+}

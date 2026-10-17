@@ -32,3 +32,40 @@ Thumbs.db
 *.log
 *.tmp
 ~$*
+
+# ---------- 测试与覆盖率产物 ----------
+#
+# ★ 为什么必须加上（实测踩到）
+#
+# `.pytest_cache` 与覆盖率产物此前**都不在忽略列表里** ——
+# 只是过去没跑过 `--cov`，所以 `.coverage` 没出现过。
+# 一旦按新流程跑（见 pyproject 的 dev 依赖与 CI），
+# `git status` 就会多出这些**机器生成物**，
+# 既干扰"我这轮改了什么"的判断，也有被误提交的风险。
+#
+# `.coverage` 是 SQLite 数据库；`.coverage.json` 是 json 报告；
+# `htmlcov/` 是 html 报告目录。
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# ---------- 迁移前的自动备份 ----------
+#
+# 迁移脚本（`eval/migrate_suites.py` 等）写盘前会留一份备份 ——
+# 趋势文件是长期资产，写坏就没法恢复。那是**本地产物**，不该入库 ——
+# 但它承载真实历史数据，故也**不自动删除**，留在工作区备查。
+#
+# ★ 为什么要用通配而不是逐个精确名
+# ----------------------------
+# 我最初只写了 `*.pre-suites-migration`（精确名），随后就出现了
+# `pre-shadowing-cleanup` / `pre-case-count-fix` / `pre-rag-count-targeted`
+# 三个**同一用途、不同名字**的备份 —— 精确名逐个追是追不完的，
+# 于是它们照样出现在 `git status` 里。
+# 改用 `*.pre-*` 覆盖"<文件名>.pre-<原因>"这个通用约定。
+#
+# 注：`*.bak-*` 是手工实验备份，同样不入库。
+*.pre-*
+*.bak-*
+

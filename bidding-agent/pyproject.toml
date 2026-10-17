@@ -28,11 +28,36 @@ dependencies = [
     # 通用
     "httpx>=0.28.1",
     "python-dotenv>=1.2.2",
+    "pymupdf>=1.28.2",
+    "python-docx>=1.2.0",
+    "python-multipart>=0.0.32",
 ]
+
+[project.optional-dependencies]
+# Langfuse LLM 可观测性（可选）。
+#
+# ★ 为什么不放进主 dependencies
+# ------------------------
+# 它带来 11 个传递依赖（opentelemetry-* 一套）与一个**外部网络依赖**。
+# 本项目的可观测性此前全部自持（health/logs/metrics/阶段耗时/LLM 追踪），
+# 引入 Langfuse 是第一个向外发数据的模块。故做成可选：
+#     未安装 → 静默降级为纯本地追踪（langfuse_tracing.build_recorder）
+#     未配置 key → 同样 no-op
+# 安装：uv pip install -e .[langfuse]
+langfuse = ["langfuse>=4.0.0"]
 
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    # ★ 测试体系的三个护栏。它们各自补一个**实测咬过人的**缺口：
+    #
+    # pytest-timeout —— 防挂死。实测代价：一个侦察脚本挂满 300s 被迫转后台，
+    #   而"哪个测试挂了"当时看不出来。有了它，挂死会**失败并指出是哪个用例**。
+    "pytest-timeout>=2.3",
+    # pytest-xdist —— 并行。实测代价：全量 76 文件 / 2189 用例串行约 163s。
+    "pytest-xdist>=3.6",
+    # pytest-cov —— 覆盖率。此前**完全没有度量**，不知道哪块没测。
+    "pytest-cov>=6.0",
     "ipykernel>=7.3.0",
     # ragas 0.4.x 与 langchain 1.x 不兼容：ragas 对 langchain-openai/community 未设上界，
     # 不钉住会被漂到 1.x 整条栈失效；未来升级 ragas 时三者需同步解锁
@@ -45,11 +70,50 @@ dev = [
 # 让测试可以从仓库根导入 src.* 包
 pythonpath = ["."]
 
-[tool.uv]
-# 骨架阶段先作为非打包项目运行；模块落地后如需要可改为打包布局
-package = false
+# ★ 单用例超时：超过 120s 判失败并**指出是哪个用例**。
+#
+# 阈值怎么定的：全量 2189 用例里最慢的实测在 30~40s 量级
+# （含真实检索/嵌入模型加载的集成用例），120s 留了 3 倍余量。
+# 定得太紧会把"慢但正常"的用例误杀，那比没有护栏更烦。
+#
+# 为什么用 `thread` 而不是默认的 `signal` 方法：
+#   `signal` 只在主线程有效，且**在 Windows 上不可用**（项目在 Windows 开发）。
+#   `thread` 方法跨平台，代价是超时后不会强杀线程（只标记失败）。
+timeout = 120
+timeout_method = "thread"
+
+# ★ 默认排除需要外部服务的用例（-m "not integration"）。
+#
+# 为什么要有这个分组（实测发现的缺陷）：
+#   绝大多数用例是**封闭**的（不打网络、不连服务），但有少数需要 Qdrant /
+#   Neo4j / Postgres 真在跑。混在一起会导致：
+#     · CI（uv sync --frozen，不装服务）上必然失败 → 流水线红
+#     · 本地（服务在跑）却是绿的 → **本地看不到 CI 的问题**
+#   实测踩到：一个用例在本地通过、在 CI 报
+#   getaddrinfo failed，因为它的 skip 判据（rag_pipeline.ready）
+#   只反映"管线初始化过"，不反映"服务此刻连得上"。
+#
+# 故分成两组：默认只跑封闭用例（快、稳、可在任何机器上跑）；
+# 需要真实链路的显式 pytest -m integration。
+addopts = "-m 'not integration' --strict-markers"
+
+markers = [
+    "integration: 需要外部服务（Qdrant/Neo4j/Postgres）在跑的用例。默认排除，用 -m integration 显式运行",
+]
+
+# ★ 输出里带最慢若干用例：跑一次就能看出"哪里在拖"。
+#
+# ⚠️ 这里的键名是 `durations`，但**它不能写在 ini 里** ——
+# 实测 pytest 会报 `PytestConfigWarning: Unknown config option: durations`
+# 然后静默忽略（看起来像生效了，其实没生效）。
+# pytest 没有为它提供 ini 选项，只有命令行 `--durations=N`。
+# 故这里不配，改由命令传入 —— 见 docs 里的用法。
 
 [[tool.uv.index]]
 # 国内镜像，按需保留
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 default = true
+
+[tool.uv]
+# 骨架阶段先作为非打包项目运行；模块落地后如需要可改为打包布局
+package = false

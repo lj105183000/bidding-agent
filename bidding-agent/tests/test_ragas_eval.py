@@ -55,7 +55,7 @@ def _patch_env(monkeypatch, sources=None, evaluate_result=None, error=None):
 
 def test_eval_one_returns_three_scores(monkeypatch):
     calls = _patch_env(monkeypatch)
-    result = mod.eval_one({"question": "保证金上限？", "reference": "不超过2%"}, llm=object(), embeddings=object())
+    result = mod.eval_one({"question": "保证金上限？", "reference": "不超过2%"}, llm=object(), embeddings=object(), config=mod._PRESETS["top5"])
     assert result["ok"] is True
     assert result["faithfulness"] == 0.8
     assert result["relevancy"] == 0.7
@@ -70,7 +70,7 @@ def test_eval_one_returns_three_scores(monkeypatch):
 
 def test_eval_one_skips_empty_sources(monkeypatch):
     _patch_env(monkeypatch, sources=[])
-    result = mod.eval_one({"question": "q", "reference": "r"}, llm=object(), embeddings=object())
+    result = mod.eval_one({"question": "q", "reference": "r"}, llm=object(), embeddings=object(), config=mod._PRESETS["top5"])
     assert result["ok"] is False
     assert "sources 为空" in result["error"]
 
@@ -78,20 +78,62 @@ def test_eval_one_skips_empty_sources(monkeypatch):
 def test_eval_one_skips_pipeline_error(monkeypatch):
     """KB 命中但生成失败：pipeline 带非空 sources + error 返回，降级回答不得计分。"""
     calls = _patch_env(monkeypatch, error="LLM 生成失败")
-    result = mod.eval_one({"question": "q", "reference": "r"}, llm=object(), embeddings=object())
+    result = mod.eval_one({"question": "q", "reference": "r"}, llm=object(), embeddings=object(), config=mod._PRESETS["top5"])
     assert result["ok"] is False
     assert "pipeline 报错" in result["error"]
     # 守卫必须短路在 ragas 判分之前：降级样本根本不该进 evaluate
     assert calls == []
 
 
-def test_eval_one_maps_nan_to_zero(monkeypatch):
+def test_eval_one_fails_loudly_on_nan(monkeypatch):
+    """★ NaN 必须让该题**显式失败**，不能静默当 0 分。
+
+    原先 NaN 被转成 0.0。这带来两类假象：
+        ① 指标名写错 → 整列恒为 0 且无报错
+        ② 裁判调用失败 → 该样本 0 分
+    两者都表现为"模型答得很差"，而实际是**度量本身坏了**。
+
+    实测危害：`AnswerRelevancy` 默认 strictness=3 会以 n=3 请求裁判，
+    DeepSeek 只支持 n=1 → 400 错误 → NaN → 被当成 0 分。
+    25 题里 2 题（8%）被这样伪造成 0 分，其中一例是"回答完全正常
+    （703 字、叙述严谨）却得 0.000"，直接把我引向了错误的优化方向。
+
+    一个静默的错误 0 比一个响亮的报错有害得多。
+    """
     _patch_env(monkeypatch, evaluate_result=SimpleNamespace(scores=[{
         "faithfulness": float("nan"), "answer_relevancy": 0.7, "context_recall": 0.9,
     }]))
-    result = mod.eval_one({"question": "q", "reference": "r"}, llm=object(), embeddings=object())
-    assert result["faithfulness"] == 0.0
+    result = mod.eval_one({"question": "q", "reference": "r"}, llm=object(), embeddings=object(), config=mod._PRESETS["top5"])
+    assert result["ok"] is False
+    assert "判分失败" in result["error"]
+    assert "faithfulness" in result["error"]
+
+
+def test_eval_one_reports_missing_metric_key(monkeypatch):
+    """指标名缺失（版本漂移）同样要显式失败，而不是当 0 分。
+
+    历史上真发生过：手写键名与 ragas 实际返回不一致，召回列恒为 0
+    且没有任何报错。
+    """
+    _patch_env(monkeypatch, evaluate_result=SimpleNamespace(scores=[{
+        "faithfulness": 0.8, "answer_relevancy": 0.7,
+        # 缺 context_recall
+    }]))
+    result = mod.eval_one({"question": "q", "reference": "r"}, llm=object(), embeddings=object(), config=mod._PRESETS["top5"])
+    assert result["ok"] is False
+    assert "recall" in result["error"]
+
+
+def test_eval_one_passes_all_three_metrics(monkeypatch):
+    """三项齐全时正常返回——别把守卫做成"永远失败"。"""
+    _patch_env(monkeypatch, evaluate_result=SimpleNamespace(scores=[{
+        "faithfulness": 0.8, "answer_relevancy": 0.7, "context_recall": 0.9,
+    }]))
+    result = mod.eval_one({"question": "q", "reference": "r"}, llm=object(), embeddings=object(), config=mod._PRESETS["top5"])
+    assert result["ok"] is True
+    assert result["faithfulness"] == 0.8
     assert result["relevancy"] == 0.7
+    assert result["recall"] == 0.9
 
 
 def test_extract_scores_prefers_scores_attr():

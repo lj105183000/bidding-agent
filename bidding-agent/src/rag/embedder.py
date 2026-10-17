@@ -125,6 +125,25 @@ class Reranker:
         self._lock = threading.Lock()
 
     @property
+    def loaded(self) -> bool:
+        """模型是否**已经**加载好（非阻塞探测，绝不触发加载）。
+
+        为什么单独提供这个属性：精排模型权重 1.1GB，加载实测约 80 秒。
+        调用方（rag_tools._rerank_web_results）需要在"直接用引擎顺序"与"等 80 秒"之间取舍。
+
+        用 `acquire(blocking=False)` 而不是直接读 `self._model`：
+        若此刻有别的线程正在加载（例如 api/server.py 的后台预热线程），
+        裸读 `self._model` 无法判断"加载中"与"未开始"，而这里**必须不阻塞**。
+        拿不到锁说明加载正在进行，此时返回 False，让调用方跳过本次精排即可。
+        """
+        if not self._lock.acquire(blocking=False):
+            return False  # 加载进行中：不等待，按"未就绪"处理
+        try:
+            return self._model is not None
+        finally:
+            self._lock.release()
+
+    @property
     def model(self):
         if self._model is None:
             with self._lock:

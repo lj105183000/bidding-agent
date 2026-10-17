@@ -167,7 +167,29 @@ class Neo4jClient:
 
         try:
             # 懒连接：GraphDatabase.driver 只准备配置与连接池，一个网络包都不发
-            self._driver = GraphDatabase.driver(uri, auth=(username, password))
+            #
+            # ★ 必须显式给超时（实测踩到）
+            # ------------------------
+            # 不设时，neo4j 驱动**依赖 OS 级 TCP 超时**。两种不可达的表现完全不同：
+            #
+            #   端口被拒（127.0.0.1:9）  → 2.0s 快速失败      实测
+            #   主机不可达（Aura 网络抖动）→ 挂起到 OS 超时，**>25s**  实测
+            #
+            # 后者会让任何真连图库的调用（含测试）长时间阻塞：实测
+            # `tests/test_fmt_functions.py` 的图表契约用例各卡满我设的
+            # pytest timeout。而图库不可达时**本来就应该快速失败**，
+            # 让上层走降级路径，而不是把请求挂在那里。
+            #
+            # 取值：10s。Aura 正常往返是百毫秒级，10s 足够容纳冷启动与
+            # 偶发抖动；而不可达时 10s 就能给出结论。
+            # `connection_acquisition_timeout` 也要设：池被占满时等待取连接
+            # 同样会无限接近默认值（60s），对 API 进程太久。
+            self._driver = GraphDatabase.driver(
+                uri,
+                auth=(username, password),
+                connection_timeout=10.0,
+                connection_acquisition_timeout=15.0,
+            )
         except Exception as exc:
             # 不回显 uri/用户名/密码，只给排查方向；原始异常进日志
             logger.exception("Neo4j driver 初始化失败")

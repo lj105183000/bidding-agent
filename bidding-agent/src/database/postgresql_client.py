@@ -185,6 +185,33 @@ def validate_agg(agg: str) -> str:
     return normalized
 
 
+def _snippet(content: Any, keyword: str, width: int = 60) -> str:
+    """从命中内容里截出关键词附近的片段，供搜索结果展示。
+
+    为什么不能直接给整段 content：一条消息可能上千字，列表里塞不下；
+    而只给开头又会丢掉命中的位置——用户看到的前 60 字里可能根本没有关键词，
+    于是不知道"为什么这条被搜出来"。
+
+    故以关键词为中心取上下文，两端加省略号。关键词找不到时（理论上不该发生，
+    因为 SQL 已经用 ILIKE 过滤过）退回开头截断，而不是返回空串——
+    返回空会让用户以为数据有问题。
+    """
+    text = " ".join(str(content or "").split())
+    if not text:
+        return ""
+    kw = (keyword or "").strip()
+    if kw:
+        pos = text.lower().find(kw.lower())
+        if pos >= 0:
+            half = max(0, (width - len(kw)) // 2)
+            start = max(0, pos - half)
+            end = min(len(text), pos + len(kw) + half)
+            prefix = "…" if start > 0 else ""
+            suffix = "…" if end < len(text) else ""
+            return f"{prefix}{text[start:end]}{suffix}"
+    return text[:width] + ("…" if len(text) > width else "")
+
+
 def _safe_limit(limit: Any, default: int = 20) -> int:
     """把调用方（多半是 LLM）给的 limit 收敛成合法整数：非法退回默认值，超限截断。
 
@@ -273,6 +300,17 @@ class PostgresClient:
         self.user = user
         self.password = password
         self.port = self._read_port()
+        #: 可选列 `messages.image_analyses` 是否可用。**三态**：
+        #:   None = 还没探测（首次用到时才探测，见 `_image_analyses_available`）
+        #:   True/False = 已探测（由 `ensure_schema()` 或首次探测写入）
+        #:
+        #: ★ 为什么不能简单默认 False（实测踩到的坑）
+        #: --------------------------------------
+        #: 第一版默认 False、只在 `ensure_schema()` 里置位。但 API 层用的是
+        #: **另一个** PostgresClient 实例（不一定跑过 ensure_schema），
+        #: 于是"保存图片解析结果"整条链路**静默失效**：字段被跳过、日志无异常、
+        #: 读回来是 None。故改为首次使用时探测一次（幂等 DDL），之后走缓存。
+        self._has_image_analyses: bool | None = None
 
     @staticmethod
     def _read_port() -> int:
@@ -704,15 +742,101 @@ class PostgresClient:
             "CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages (conversation_id, created_at)",
             "CREATE INDEX IF NOT EXISTS idx_feedback_conversation ON feedback (conversation_id)",
         )
+
+        # ★ 对话历史搜索用的扩展与索引，**单独一批执行**
+        #
+        # 为什么用 pg_trgm 而不是 PostgreSQL 全文检索（实测结论）
+        # ----------------------------------------------------
+        # `to_tsvector('simple', '中国大陆和香港的招投标法规的区别')` 返回的是
+        # **整个句子作为 1 个 token**——它按空格/标点分词，而中文没有空格。
+        # 搜「香港」的 `@@` 匹配结果是 **False**。即内置全文检索对中文不可用。
+        # 本机也没有 zhparser / pg_jieba 这类中文分词扩展（已实测：不可用）。
+        #
+        # 故改用 `ILIKE` 子串匹配 + pg_trgm 的 GIN 索引加速。实测：
+        #   · 2 字中文词也能生成 trigram（'香港' → 3 个），索引对短词有效
+        #   · 执行计划确认走 Bitmap Index Scan
+        #
+        # 为什么与核心表**分两批**执行
+        # --------------------------
+        # 上面的 core 语句在同一个事务里执行（Postgres 支持事务化 DDL），
+        # 这是有意的：要么三张表都建好，要么一条都不留。
+        #
+        # 但 `CREATE EXTENSION` 需要**超级用户权限**，某些托管环境不给。
+        # 若把扩展混进同一批，一旦失败会**连同建表一起回滚**——
+        # 于是"少个索引"导致整个应用起不来，本末倒置。
+        #
+        # 判据：建表失败 = 应用不可用（必须报错）；建索引失败 = 搜索变慢，
+        # 但功能仍在（只告警）。
+        optional_statements = (
+            "CREATE EXTENSION IF NOT EXISTS pg_trgm",
+            "CREATE INDEX IF NOT EXISTS idx_messages_content_trgm "
+            "ON messages USING gin (content gin_trgm_ops)",
+            "CREATE INDEX IF NOT EXISTS idx_conversations_title_trgm "
+            "ON conversations USING gin (title gin_trgm_ops)",
+        )
+        core_statements = tuple(statements)
+
         try:
             with self._conn() as conn, conn.cursor() as cur:
-                for statement in statements:
+                for statement in core_statements:
                     cur.execute(statement)
         except Exception:
             logger.exception("建表失败（ensure_schema）")
             return False
+
+        try:
+            with self._conn() as conn, conn.cursor() as cur:
+                for statement in optional_statements:
+                    cur.execute(statement)
+        except Exception as exc:
+            # 权限不足 / 扩展不可用：搜索仍能工作（退化为全表扫描），
+            # 只是上万条以后会慢。故只告警，不影响整体就绪。
+            logger.warning(
+                "pg_trgm 扩展或中文搜索索引创建失败（对话搜索将退化为全表扫描，"
+                "数据量大时变慢；建扩展需要超级用户权限）：%s",
+                type(exc).__name__,
+            )
+
         logger.info("会话 / 反馈表已就绪")
+        # ★ 可选列：`messages.image_analyses`（图片解析文本落库）
+        #
+        # 放在**建表之后**、且用幂等 `ADD COLUMN IF NOT EXISTS`：
+        # `CREATE TABLE IF NOT EXISTS` 不会给已有的表补列，故老库必须显式补。
+        #
+        # ★ 为什么把结果**缓存成实例标志**，而不是让读写两端各自 try/except
+        # ------------------------------------------------------------
+        # `_query` 会**吞掉异常并返回 []**（见它的实现）。若读取端直接
+        # `SELECT image_analyses ...` 而列不存在，得到的是"查询失败 → 返回 []"，
+        # 表现为**整个会话历史突然变空**，且没有任何异常冒到调用方。
+        # 故这里探测一次、记下可用性，读端据此决定要不要把该列放进 SELECT：
+        # 列不存在时退化为老 SELECT（历史照常读出来，只是没有图片解析结果）。
+        from src.database.image_analyses_migration import ensure_column
+
+        self._has_image_analyses = bool(ensure_column(self))
+        if not self._has_image_analyses:
+            logger.warning("messages.image_analyses 不可用：图片解析结果将不落库")
         return True
+
+    def _image_analyses_available(self) -> bool:
+        """`messages.image_analyses` 是否可用（**首次使用时探测一次**）。
+
+        ★ 为什么做成惰性探测而不是只靠 `ensure_schema()`
+        -------------------------------------------
+        API 层与其它调用方各有自己的 `PostgresClient` 实例，不保证谁跑过
+        `ensure_schema()`。第一版只在 ensure_schema 里置位，结果是
+        "换个实例保存 → 字段被静默跳过 → 读回来是 None"（实测踩到）。
+        惰性探测把这件事变成"无论谁先用到，都会先把列补上"。
+
+        代价：每个实例最多一次幂等 DDL（`ADD COLUMN IF NOT EXISTS`），
+        之后走 `self._has_image_analyses` 缓存。
+        """
+        if self._has_image_analyses is None:
+            from src.database.image_analyses_migration import ensure_column
+
+            self._has_image_analyses = bool(ensure_column(self))
+            if not self._has_image_analyses:
+                logger.warning("messages.image_analyses 不可用：图片解析结果将不落库")
+        return bool(self._has_image_analyses)
 
     def create_conversation(self, title: str, session_id: str | None = None) -> int:
         """新建会话，返回 `conversation_id`；失败返回 `-1`。
@@ -753,6 +877,206 @@ class PostgresClient:
         LIMIT %s
         """
         return self._query(sql, (safe_limit,))
+
+    def search_conversations(self, keyword: str, limit: int = 30) -> list[dict]:
+        """按关键词搜索对话历史（**标题 + 消息内容**），按相关性降序。
+
+        返回 `[{"id","session_id","title","created_at","matched_in","snippet",
+        "message_count","relevance"}]`。
+
+        `matched_in` 告知命中位置（`title` / `message` / `both`），
+        `snippet` 是命中处的上下文片段——搜索结果只给标题的话，
+        用户看不出"为什么这条被搜出来"，只能逐条点开确认。
+
+        ★ 为什么不用 PostgreSQL 的全文检索（实测结论）
+        --------------------------------------------
+        `to_tsvector('simple', '中国大陆和香港的招投标法规的区别')`
+        返回的是**整个句子作为 1 个 token**——因为它按空格/标点分词，
+        而中文没有空格。搜「香港」的 `@@` 匹配结果为 **False**。
+        即：内置全文检索对中文完全不可用。
+
+        本机也没有 zhparser / pg_jieba 这类中文分词扩展（已实测：不可用）。
+
+        故改用 `ILIKE` 子串匹配 + `pg_trgm` 的 GIN 索引加速：
+
+            ILIKE              精确子串，中文可靠（"香港" 就是匹配 "香港"）
+            pg_trgm GIN 索引   实测 2 字中文词也能生成 trigram
+                               （'香港' → 3 个 trigram），
+                               执行计划确认走 Bitmap Index Scan
+            similarity()       模糊匹配分，用于相关性**排序**
+
+        为什么保留 ILIKE 而不是只用 similarity 阈值：
+        `similarity('香港招投标法规', '投标保证金的退还时限')` = 0.0，
+        但 `similarity('保证金', '投标保证金不得超过预算金额的2%')` = 0.0526——
+        **短词与长文本的相似度天然很低**，设阈值会把正确结果过滤掉。
+        故用 ILIKE 保证"能搜到"，用 similarity 只做"排得准"。
+
+        排序规则（三级，稳）：
+            1. 标题命中优先（标题是用户自己写的，意图最明确）
+            2. similarity 降序（越像越前）
+            3. id 降序（同分时新的在前）
+        """
+        text = (keyword or "").strip()
+        if not text:
+            return []
+        safe_limit = _safe_limit(limit, default=30)
+
+        # 模式串必须过 _like_param：参数化管注入，管不了通配符语义——
+        # 用户搜 "100%" 时原样的 % 会变成"匹配全表"（见模块 docstring）。
+        #
+        # ⚠️ 传**裸关键词**，不要自己包两侧的 `%`：
+        # `_like_param` 内部已经会补，再包一层会把自己的 `%` 也转义成字面量，
+        # 于是 ILIKE 变成"匹配包含字面量 %香港% 的文本"，永远搜不到东西。
+        pattern = _like_param(text)
+
+        # 位置参数（`_query` 只接受序列，不支持具名参数）：
+        #   ① %s = 标题/正文的 ILIKE 模式串
+        #   ② %s = 原始关键词（给 similarity 用，不要带 % 通配符）
+        #   ③ %s = limit
+        # 同一个 %s 可以在一条语句里重复出现，驱动按位置复用同一个值。
+        sql = """
+        WITH matched AS (
+            SELECT
+                c.id,
+                c.session_id,
+                c.title,
+                c.created_at,
+                bool_or(m.id IS NOT NULL)          AS hit_message,
+                (c.title ILIKE %s)                 AS hit_title,
+                max(GREATEST(
+                    similarity(COALESCE(c.title, ''), %s),
+                    similarity(COALESCE(m.content, ''), %s)
+                ))                                 AS relevance,
+                (
+                    SELECT m2.content
+                    FROM messages m2
+                    WHERE m2.conversation_id = c.id
+                      AND m2.content ILIKE %s
+                    ORDER BY m2.id ASC
+                    LIMIT 1
+                )                                  AS hit_content
+            FROM conversations c
+            LEFT JOIN messages m
+                   ON m.conversation_id = c.id
+                  AND m.content ILIKE %s
+            WHERE c.title ILIKE %s
+               OR m.id IS NOT NULL
+            GROUP BY c.id, c.session_id, c.title, c.created_at
+        )
+        SELECT
+            id, session_id, title, created_at,
+            hit_title, hit_message, relevance, hit_content,
+            (SELECT count(*) FROM messages m3 WHERE m3.conversation_id = matched.id)
+                AS message_count
+        FROM matched
+        ORDER BY hit_title DESC, relevance DESC NULLS LAST, id DESC
+        LIMIT %s
+        """
+
+        rows = self._query(sql, (pattern, text, text, pattern, pattern, pattern, safe_limit))
+
+        out: list[dict] = []
+        for r in rows:
+            hit_title = bool(r.get("hit_title"))
+            hit_message = bool(r.get("hit_message"))
+            if hit_title and hit_message:
+                matched_in = "both"
+            elif hit_title:
+                matched_in = "title"
+            else:
+                matched_in = "message"
+
+            out.append(
+                {
+                    "id": r.get("id"),
+                    "session_id": r.get("session_id"),
+                    "title": r.get("title"),
+                    "created_at": r.get("created_at"),
+                    "matched_in": matched_in,
+                    "snippet": _snippet(r.get("hit_content"), text),
+                    "message_count": int(r.get("message_count") or 0),
+                    "relevance": (
+                        round(float(r["relevance"]), 4)
+                        if r.get("relevance") is not None
+                        else None
+                    ),
+                }
+            )
+        return out
+
+    def list_conversations_detailed(self, limit: int = 50) -> list[dict]:
+        """会话列表（新建的在前），**带消息数与首条用户消息预览**。
+
+        与 `list_conversations` 的区别：多返回 `message_count` / `preview` /
+        `last_message_at`。
+
+        为什么恢复会话需要这些（而不是只要 id + title）：
+            1. **title 常常是自动生成的**（取首句截断），信息量低；
+               预览能让用户认出"就是那次问香港法规的对话"
+            2. **message_count = 0 的会话**（用户点了新建但没提问）应当能识别出来，
+               否则列表里全是空会话
+            3. `last_message_at` 让"最近聊过的"排在前面更符合直觉——
+               只用 created_at 的话，一个昨天建、今天还在用的长会话会沉到底部
+
+        预览取**首条 user 消息**（不是首条消息）：首条 assistant 通常是欢迎语，
+        各会话都一样，用它做预览没有区分度。
+        """
+        safe_limit = _safe_limit(limit, default=50)
+        sql = """
+        SELECT
+            c.id,
+            c.session_id,
+            c.title,
+            c.created_at,
+            (SELECT count(*) FROM messages m WHERE m.conversation_id = c.id)
+                AS message_count,
+            (
+                SELECT m2.content
+                FROM messages m2
+                WHERE m2.conversation_id = c.id AND m2.role = 'user'
+                ORDER BY m2.id ASC
+                LIMIT 1
+            ) AS preview,
+            (SELECT max(m3.created_at) FROM messages m3 WHERE m3.conversation_id = c.id)
+                AS last_message_at
+        FROM conversations c
+        ORDER BY COALESCE(
+                    (SELECT max(m4.created_at) FROM messages m4 WHERE m4.conversation_id = c.id),
+                    c.created_at
+                 ) DESC NULLS LAST,
+                 c.id DESC
+        LIMIT %s
+        """
+        rows = self._query(sql, (safe_limit,))
+        out: list[dict] = []
+        for r in rows:
+            preview = (r.get("preview") or "").strip().replace("\n", " ")
+            out.append(
+                {
+                    "id": r.get("id"),
+                    "session_id": r.get("session_id"),
+                    "title": r.get("title"),
+                    "created_at": r.get("created_at"),
+                    "message_count": int(r.get("message_count") or 0),
+                    "preview": preview[:80],
+                    "last_message_at": r.get("last_message_at"),
+                }
+            )
+        return out
+
+    def rename_conversation(self, conversation_id: int, title: str) -> bool:
+        """重命名会话（用户改标题），返回是否真的更新了一条。
+
+        `title` 为空白时**拒绝**而不是写成空串：会话没有标题后，
+        列表里就只剩 id，用户再也认不出是哪次对话。
+        """
+        cid = _as_id(conversation_id, "conversation_id")
+        text = (title or "").strip()
+        if not text:
+            return False
+        sql = "UPDATE conversations SET title = %s WHERE id = %s RETURNING id"
+        rows = self._query(sql, (text[:120], cid))
+        return bool(rows)
 
     def delete_conversation(self, conversation_id: int) -> bool:
         """删除会话及其消息 / 反馈，返回是否真的删掉了一条会话。
@@ -796,6 +1120,8 @@ class PostgresClient:
         content: str,
         sources: Any = None,
         tool_name: str | None = None,
+        trace_id: str | None = None,
+        image_analyses: Any = None,
     ) -> int:
         """写入一条会话消息，返回新消息 `id`；失败返回 `-1`。
 
@@ -821,6 +1147,52 @@ class PostgresClient:
         """
         cid = _as_id(conversation_id, "conversation_id")
         payload = Jsonb(sources) if sources is not None else None
+        # ★ `trace_id` 是可选的（P0：把用户反馈接成 Langfuse Score）
+        #
+        # 列可能不存在（老库未加列），故**先确保列存在**，失败则退化为不带该列插入。
+        # 这样"加不上列"只意味着反馈接不上 Langfuse，会话保存本身不受影响。
+        if trace_id:
+            try:
+                from src.database.trace_migration import ensure_column
+
+                ensure_column(self)
+                sql = """
+                INSERT INTO messages
+                    (conversation_id, role, content, sources, tool_name, trace_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """
+                rows = self._query(
+                    sql, (cid, role, content, payload, tool_name, str(trace_id))
+                )
+                if rows:
+                    return int(rows[0]["id"])
+            except Exception:  # noqa: BLE001 - 带 trace_id 失败则退回不带
+                logger.debug("带 trace_id 写消息失败，退化为普通写入", exc_info=True)
+
+        # ★ 图片解析文本（"只存解析文本"方案）：原图不入库
+        #
+        # 与 trace_id 同一套写法：列可能不存在（老库），故失败就退化为不带该列插入 ——
+        # "图片解析结果没存上"不该让整条消息都写不进去。
+        # 与 trace_id 的区别：这里先用 `ensure_schema()` 探测好的标志判断，
+        # 不重复跑 DDL（每次保存都 ALTER 一次是浪费，且要持有 DDL 权限）。
+        if image_analyses and self._image_analyses_available():
+            try:
+                sql = """
+                INSERT INTO messages
+                    (conversation_id, role, content, sources, tool_name, image_analyses)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """
+                rows = self._query(
+                    sql,
+                    (cid, role, content, payload, tool_name, Jsonb(image_analyses)),
+                )
+                if rows:
+                    return int(rows[0]["id"])
+            except Exception:  # noqa: BLE001 - 带 image_analyses 失败则退回不带
+                logger.debug("带 image_analyses 写消息失败，退化为普通写入", exc_info=True)
+
         sql = """
         INSERT INTO messages (conversation_id, role, content, sources, tool_name)
         VALUES (%s, %s, %s, %s, %s)
@@ -830,6 +1202,34 @@ class PostgresClient:
         if not rows:
             return -1
         return int(rows[0]["id"])
+
+    def find_trace_id_by_message(self, message_id: int) -> str | None:
+        """按消息 id 取它对应的 Langfuse trace_id。取不到返回 None。
+
+        反馈端点用它把"赞/踩"挂成 Langfuse 的 Score
+        （`create_score(trace_id=...)`）。
+
+        ★ 取不到是**正常情况**，不该告警：
+            · 未配置 Langfuse（没有 trace 可挂）
+            · 老消息（加列之前写入的）
+            · trace 映射已过期
+        故这里只做查询并返回 None，不记录 warning。
+        """
+        try:
+            mid = _as_id(message_id, "message_id")
+        except ValueError:
+            return None
+        try:
+            rows = self._query(
+                "SELECT trace_id FROM messages WHERE id = %s", (mid,)
+            )
+            if rows and isinstance(rows[0], dict):
+                v = rows[0].get("trace_id")
+                return str(v) if v else None
+            return None
+        except Exception:  # noqa: BLE001 - 列不存在/查询失败都只是"取不到"
+            logger.debug("按消息查 trace_id 失败", exc_info=True)
+            return None
 
     def load_messages(self, conversation_id: int, limit: int = 100) -> list[dict]:
         """读回某会话的消息，返回 `[{"id", "role", "content", "sources", "tool_name",
@@ -851,10 +1251,16 @@ class PostgresClient:
         """
         cid = _as_id(conversation_id, "conversation_id")
         safe_limit = _safe_limit(limit, default=100)
-        sql = """
-        SELECT id, role, content, sources, tool_name, created_at
+        # ★ 可选列：老库没有 `image_analyses` 时**不能**把它写进 SELECT
+        #
+        # `_query` 会把异常吞成 `[]`，于是"列不存在"会表现为**整个会话历史变空**
+        # （用户看到对话凭空消失，日志里只有一条 PostgreSQL 查询失败）。
+        # 故按 `ensure_schema()` 探测到的标志选择列清单，缺列时退化为老 SELECT。
+        extra = ", image_analyses" if self._image_analyses_available() else ""
+        sql = f"""
+        SELECT id, role, content, sources, tool_name, created_at{extra}
         FROM (
-            SELECT id, role, content, sources, tool_name, created_at
+            SELECT id, role, content, sources, tool_name, created_at{extra}
             FROM messages
             WHERE conversation_id = %s
             ORDER BY created_at DESC, id DESC

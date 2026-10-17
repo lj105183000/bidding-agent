@@ -13,6 +13,7 @@ import pytest
 from qdrant_client import models
 
 from src.config import settings
+from src.rag.classify_question import RRF_PARAMS, QuestionCategory
 from src.rag.constants import RERANK_CANDIDATE_K
 from src.rag.embedder import Reranker, _sigmoid
 from src.rag.pipeline import RAGPipeline
@@ -210,19 +211,35 @@ class _FakeBM25:
 
 
 class _RecordingStore:
+    """记录每路检索收到的 limit。
+
+    ★ 为什么记 `limits` 列表而不是单个 `limit`（docs/39）
+    ------------------------------------------------
+    pipeline 统一走两路检索 + 应用层融合后，一次逻辑检索会调用
+    `dense_search` 与 `sparse_search` **各一次**。
+    只记最后一个会把两路混为一谈，测不出"两路是否都拿到了预期 limit"。
+    """
+
     def __init__(self, hits: list[dict]) -> None:
         self.hits = hits
-        self.limit: int | None = None
+        self.limits: list[int] = []
 
-    def hybrid_search(self, dense, sparse, limit=5, prefetch_limit=30):
-        self.limit = limit
+    @property
+    def limit(self) -> int | None:
+        """最后一次收到的 limit（保持旧断言可读性）。"""
+        return self.limits[-1] if self.limits else None
+
+    def hybrid_search(self, dense, sparse, limit=5, prefetch_limit=30,
+                      dense_weight=1.0, sparse_weight=1.0, rrf_k=None):
+        self.limits.append(limit)
         return self.hits[:limit]
 
     def dense_search(self, dense_vector, *, limit=30):
-        self.limit = limit
+        self.limits.append(limit)
         return self.hits[:limit]
 
     def sparse_search(self, sparse_vector, *, limit=30):
+        self.limits.append(limit)
         return self.hits[:limit]
 
 
@@ -250,23 +267,42 @@ def rerank_on(monkeypatch):
     monkeypatch.setattr(settings, "rerank_enabled", False)
 
 
-def test_rerank_disabled_uses_top_k_directly(monkeypatch):
+def test_rerank_disabled_returns_top_k(monkeypatch):
+    """不精排时：两路按 **prefetch_limit** 召回，最终返回 **top_k** 条。
+
+    ★ 两个数不是一回事（我第一版断言写错，实测修正）
+    --------------------------------------------
+        prefetch_limit   每路召回多少条（喂给融合的候选池）
+        top_k            融合后最终返回多少条
+
+    融合统一到应用层后，扩大候选池体现在 `dense_search` / `sparse_search`
+    收到的 `limit`（= prefetch_limit），而不再是 `hybrid_search` 的 limit。
+    上一版断言 `limit == top_k` 是把这两个数混为一谈。
+    """
     monkeypatch.setattr(settings, "rerank_enabled", False)
     store = _RecordingStore(CANDIDATES)
     fake = _FakeReranker()
     result = _pipeline(store, fake).search("查询什么？", top_k=2)
 
-    assert store.limit == 2, "不精排时无需扩大候选池"
+    expected_prefetch = RRF_PARAMS[QuestionCategory.SENTENCE]["prefetch_limit"]
+    assert store.limits == [expected_prefetch, expected_prefetch], (
+        f"两路都应按 prefetch_limit={expected_prefetch} 召回，实际 {store.limits}"
+    )
     assert fake.called_with is None, "关闭精排不应调用模型"
-    assert len(result) == 2
+    assert len(result) == 2, "最终返回 top_k 条"
 
 
 def test_rerank_enabled_widens_candidate_pool_and_reorders(rerank_on):
+    """精排前必须先扩大候选池：两路 limit 应到 max(top_k, RERANK_CANDIDATE_K)。"""
     store = _RecordingStore(CANDIDATES)
     fake = _FakeReranker()
     result = _pipeline(store, fake).search("查询什么？", top_k=2)
 
-    assert store.limit == RERANK_CANDIDATE_K, "精排前必须先扩大候选池"
+    # 候选取 max(top_k, RERANK_CANDIDATE_K)——精排要有足够候选才有意义
+    expected = max(2, RERANK_CANDIDATE_K)
+    assert all(lim >= expected for lim in store.limits), (
+        f"精排前候选池应不小于 {expected}，实际 {store.limits}"
+    )
     assert fake.called_with == ("查询什么？", len(CANDIDATES), 2)
     assert [item["question"] for item in result] == ["问题C", "问题B"]
 

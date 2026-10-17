@@ -34,7 +34,17 @@ from src.tools.rag_tools import (
 
 
 class _FakeRagPipeline:
-    """模拟成员 B 的 RAGPipeline：`search(question, top_k=N)` 返回条目或抛异常。"""
+    """模拟成员 B 的 RAGPipeline：返回条目或抛异常。
+
+    ★ 必须同时提供 `search` 与 `search_cached`（契约变更）
+    ------------------------------------------------
+    `search_knowledge_base` 工具**已改为调 `search_cached`**
+    （原先调 `search`，导致 Agent 路径完全绕过缓存——实测缺陷，见 docs/40）。
+
+    替身只实现 `search` 时，工具会在 `AttributeError` 处进 except，
+    返回「知识库检索失败」文案 —— **测试看到的是"检索失败"而非"契约不符"**，
+    排查方向会被带偏（实测如此）。
+    """
 
     def __init__(self, items=None, error=None):
         self.items = items if items is not None else []
@@ -46,6 +56,10 @@ class _FakeRagPipeline:
         if self.error is not None:
             raise self.error
         return self.items
+
+    def search_cached(self, question, top_k=5):
+        """与 `search` 同签名同返回——替身不模拟缓存语义。"""
+        return self.search(question, top_k=top_k)
 
 
 class _FakeGraphClient:
@@ -163,10 +177,41 @@ class Test_格式化知识库:
         assert "[1]" in text and "[2]" in text
 
     def test_分数高低给出不同的可信度提示(self):
-        """验证高分与低分批次给出的引用建议不同。"""
-        high = _fmt_rag([{"question": "Q", "answer": "A", "score": 0.9}])
-        low = _fmt_rag([{"question": "Q", "answer": "A", "score": 0.1}])
+        """验证高分与低分批次给出的引用建议不同。
+
+        ★ 必须用 `relevance` 而不是 `score`（这里原先用 score，正是 bug 本身）
+        ---------------------------------------------------------------
+        `score` 是 **RRF 融合分**，只反映候选内排名——项目自己的注释写着
+        「任何查询都会有第一名，实测无关问题的 RRF 分（最高 0.500）
+        能高于相关问题（最低 0.081）」。
+
+        而原先实现正是拿 `score` 的平均值去比 0.5 打标签，于是
+        **检索良好的问题会被告知「匹配度一般，请结合其他信息判断」**，
+        模型据此认为资料不可靠——把质量信号喂反了（实测：真实 relevance 0.69，
+        而 score 只有 0.10）。
+        """
+        high = _fmt_rag([{"question": "Q", "answer": "A", "relevance": 0.9}])
+        low = _fmt_rag([{"question": "Q", "answer": "A", "relevance": 0.1}])
         assert high.splitlines()[0] != low.splitlines()[0]
+        assert "良好" in high.splitlines()[0]
+        assert "一般" in low.splitlines()[0]
+
+    def test_score不再驱动可信度标签(self):
+        """★ 回归哨兵：只有 `score`（无 relevance）时**不得**下「匹配度良好」的结论。
+
+        RRF 分不支持下这个判断。这条守住在有人图省事把判据改回 score 时报警。
+        """
+        text = _fmt_rag([{"question": "Q", "answer": "A", "score": 0.99}])
+        first = text.splitlines()[0]
+        assert "良好" not in first
+        assert "无法判断相关性" in first
+
+    def test_相关度标注分数口径(self):
+        """两种分数量纲不同，输出里必须标口径，否则模型会拿它们互相比较。"""
+        with_rel = _fmt_rag([{"question": "Q", "answer": "A", "relevance": 0.7}])
+        only_score = _fmt_rag([{"question": "Q", "answer": "A", "score": 0.7}])
+        assert "相关度：0.70" in with_rel
+        assert "排名分(不可判相关)：0.70" in only_score
 
     def test_limit生效只渲染前N条(self):
         """验证 limit 参数截断条目数，而不是把全部结果都塞进上下文。"""
@@ -400,28 +445,28 @@ class Test_知识库执行器:
     def test_模块未就绪时降级且不抛异常(self, monkeypatch):
         """验证 RAGPipeline 拿不到时返回文案与空来源，而不是抛异常。"""
         _install(monkeypatch, "_get_rag_pipeline", None)
-        text, sources = TOOL_EXECUTORS["search_knowledge_base"]({"query": "空调采购"})
+        text, sources = TOOL_EXECUTORS["search_knowledge_base"]({"query": "空调采购"})[:2]
         assert isinstance(text, str) and text.strip()
         assert sources == []
 
     def test_检索抛异常时降级且不抛异常(self, monkeypatch):
         """验证底层检索报错时吞掉异常并返回文案。"""
         _install(monkeypatch, "_get_rag_pipeline", _FakeRagPipeline(error=RuntimeError("Qdrant 连接失败")))
-        text, sources = TOOL_EXECUTORS["search_knowledge_base"]({"query": "空调采购"})
+        text, sources = TOOL_EXECUTORS["search_knowledge_base"]({"query": "空调采购"})[:2]
         assert text.strip() and sources == []
         assert "Qdrant" not in text
 
     def test_检索无结果时降级(self, monkeypatch):
         """验证后端返回空列表时给出"未找到"类文案与空来源。"""
         _install(monkeypatch, "_get_rag_pipeline", _FakeRagPipeline(items=[]))
-        text, sources = TOOL_EXECUTORS["search_knowledge_base"]({"query": "空调采购"})
+        text, sources = TOOL_EXECUTORS["search_knowledge_base"]({"query": "空调采购"})[:2]
         assert text.strip() and sources == []
 
     def test_缺少检索内容时提示补参数(self, monkeypatch):
         """验证 query 与用户问题都为空时不调用后端，直接提示缺参数。"""
         pipeline = _FakeRagPipeline(items=[{"question": "Q", "answer": "A"}])
         _install(monkeypatch, "_get_rag_pipeline", pipeline)
-        text, sources = TOOL_EXECUTORS["search_knowledge_base"]({}, "")
+        text, sources = TOOL_EXECUTORS["search_knowledge_base"]({}, "")[:2]
         assert text.strip() and sources == []
         assert pipeline.calls == []
 
@@ -432,15 +477,37 @@ class Test_知识库执行器:
         TOOL_EXECUTORS["search_knowledge_base"]({}, "2025年空调采购情况")
         assert pipeline.calls[0]["question"] == "2025年空调采购情况"
 
-    def test_正常检索的来源严格三个键(self, monkeypatch):
-        """验证 sources 元素恰为 question/answer/score，且与格式化文本一致。"""
-        pipeline = _FakeRagPipeline(items=[{"question": "Q1", "answer": "A1", "score": 0.83}])
+    def test_正常检索的来源字段契约(self, monkeypatch):
+        """验证 sources 元素的字段契约，且与格式化文本一致。
+
+        2026-10 起为**四个键**：`question` / `answer` / `score` / `relevance`。
+
+        新增 `relevance` 是有意的增量：`score` 是 RRF 排名分（任何查询都有第一名），
+        **无法判断相关性**；`relevance` 才是稠密余弦相似度。原先丢掉它导致
+        前端与质量判断只能看到一个无意义的 0.10。
+        """
+        pipeline = _FakeRagPipeline(items=[{
+            "question": "Q1", "answer": "A1", "score": 0.83, "relevance": 0.71,
+        }])
         _install(monkeypatch, "_get_rag_pipeline", pipeline)
-        text, sources = TOOL_EXECUTORS["search_knowledge_base"]({"query": "空调采购"})
+        text, sources = TOOL_EXECUTORS["search_knowledge_base"]({"query": "空调采购"})[:2]
         assert "Q1" in text
         assert len(sources) == 1
-        assert sorted(sources[0]) == ["answer", "question", "score"]
+        assert sorted(sources[0]) == ["answer", "question", "relevance", "score"]
         assert sources[0]["score"] == 0.83
+        assert sources[0]["relevance"] == 0.71
+
+    def test_无relevance时字段仍存在为None(self, monkeypatch):
+        """检索结果没带 relevance（如旧契约的 fake）时，键要在、值为 None。
+
+        键缺失会让下游 `s.get("relevance")` 与 `"relevance" in s` 行为不一致，
+        前端拿不到稳定的形状。
+        """
+        pipeline = _FakeRagPipeline(items=[{"question": "Q1", "answer": "A1", "score": 0.5}])
+        _install(monkeypatch, "_get_rag_pipeline", pipeline)
+        _, sources = TOOL_EXECUTORS["search_knowledge_base"]({"query": "空调"})[:2]
+        assert "relevance" in sources[0]
+        assert sources[0]["relevance"] is None
 
     def test_top_k参数越界被收敛(self, monkeypatch):
         """验证 LLM 给出超范围的 top_k 时被夹到上限，不会一路传到检索层。"""
@@ -456,42 +523,42 @@ class Test_图谱执行器:
     def test_客户端未就绪时降级且不抛异常(self, monkeypatch):
         """验证 Neo4j 客户端拿不到时返回文案与空来源。"""
         _install(monkeypatch, "_get_neo4j", None)
-        text, sources = TOOL_EXECUTORS["search_knowledge_graph"]({"query_type": "graph_stats"})
+        text, sources = TOOL_EXECUTORS["search_knowledge_graph"]({"query_type": "graph_stats"})[:2]
         assert text.strip() and sources == []
 
     def test_查询抛异常时降级且不抛异常(self, monkeypatch):
         """验证客户端报错时吞掉异常并返回文案。"""
         _install(monkeypatch, "_get_neo4j", _FakeGraphClient(error=RuntimeError("Aura 已暂停")))
-        text, sources = TOOL_EXECUTORS["search_knowledge_graph"]({"query_type": "top_traded"})
+        text, sources = TOOL_EXECUTORS["search_knowledge_graph"]({"query_type": "top_traded"})[:2]
         assert text.strip() and sources == []
         assert "Aura" not in text
 
     def test_空结果时按健康状态区分没连上还是没查到(self, monkeypatch):
         """验证同为空的两种原因给出不同文案：服务不可用 vs 未找到。"""
         _install(monkeypatch, "_get_neo4j", _FakeGraphClient(data=[], healthy=False))
-        down, _ = TOOL_EXECUTORS["search_knowledge_graph"]({"query_type": "search_entity", "entity": "空调"})
+        down, _ = TOOL_EXECUTORS["search_knowledge_graph"]({"query_type": "search_entity", "entity": "空调"})[:2]
         _install(monkeypatch, "_get_neo4j", _FakeGraphClient(data=[], healthy=True))
-        empty, _ = TOOL_EXECUTORS["search_knowledge_graph"]({"query_type": "search_entity", "entity": "空调"})
+        empty, _ = TOOL_EXECUTORS["search_knowledge_graph"]({"query_type": "search_entity", "entity": "空调"})[:2]
         assert down != empty
 
     def test_未知查询类型回落到模糊搜索(self, monkeypatch):
         """验证模型猜错 query_type 时回落到 search_entity，而不是直接失败。"""
         client = _FakeGraphClient(data=[{"name": "空调", "label": "SubjectMatter"}])
         _install(monkeypatch, "_get_neo4j", client)
-        text, _ = TOOL_EXECUTORS["search_knowledge_graph"]({"query_type": "不存在的类型", "entity": "空调"})
+        text, _ = TOOL_EXECUTORS["search_knowledge_graph"]({"query_type": "不存在的类型", "entity": "空调"})[:2]
         assert "空调" in text
 
     def test_缺实体名时提示补参数(self, monkeypatch):
         """验证需要实体名的查询类型在缺参数时给出可读提示。"""
         client = _FakeGraphClient(data=[{"name": "空调"}])
         _install(monkeypatch, "_get_neo4j", client)
-        text, sources = TOOL_EXECUTORS["search_knowledge_graph"]({"query_type": "entity_detail"}, "")
+        text, sources = TOOL_EXECUTORS["search_knowledge_graph"]({"query_type": "entity_detail"}, "")[:2]
         assert text.strip() and sources == []
 
     def test_图谱来源恒为空(self, monkeypatch):
         """验证图谱结果不进 sources（图谱没有可引用的问答对）。"""
         _install(monkeypatch, "_get_neo4j", _FakeGraphClient(data={"SubjectMatter": 2528}))
-        text, sources = TOOL_EXECUTORS["search_knowledge_graph"]({"query_type": "graph_stats"})
+        text, sources = TOOL_EXECUTORS["search_knowledge_graph"]({"query_type": "graph_stats"})[:2]
         assert "2528" in text
         assert sources == []
 
@@ -502,20 +569,20 @@ class Test_业务库执行器:
     def test_客户端未就绪时降级且不抛异常(self, monkeypatch):
         """验证 PG 客户端拿不到时返回文案与空来源。"""
         _install(monkeypatch, "_get_postgres", None)
-        text, sources = TOOL_EXECUTORS["query_database"]({"query_type": "stats_overview"})
+        text, sources = TOOL_EXECUTORS["query_database"]({"query_type": "stats_overview"})[:2]
         assert text.strip() and sources == []
 
     def test_查询抛异常时降级且不抛异常(self, monkeypatch):
         """验证客户端报错时吞掉异常并返回"服务不可用"类文案。"""
         _install(monkeypatch, "_get_postgres", _FakePgClient(error=RuntimeError("password authentication failed")))
-        text, sources = TOOL_EXECUTORS["query_database"]({"query_type": "stats_overview"})
+        text, sources = TOOL_EXECUTORS["query_database"]({"query_type": "stats_overview"})[:2]
         assert text.strip() and sources == []
         assert "password" not in text
 
     def test_参数非法时回给LLM可改的提示(self, monkeypatch):
         """验证底层 ValueError 不被当成服务故障，而是提示参数有误。"""
         _install(monkeypatch, "_get_postgres", _FakePgClient(error=ValueError("group_by 只支持 month / year")))
-        text, sources = TOOL_EXECUTORS["query_database"]({"query_type": "trend", "group_by": "quarter"})
+        text, sources = TOOL_EXECUTORS["query_database"]({"query_type": "trend", "group_by": "quarter"})[:2]
         assert text.strip() and sources == []
         assert "参数" in text
 
@@ -523,7 +590,7 @@ class Test_业务库执行器:
         """验证关键词类查询缺参数时不拿空串去查，而是明确说缺什么。"""
         client = _FakePgClient(data=[])
         _install(monkeypatch, "_get_postgres", client)
-        text, sources = TOOL_EXECUTORS["query_database"]({"query_type": "search_by_keyword"}, "")
+        text, sources = TOOL_EXECUTORS["query_database"]({"query_type": "search_by_keyword"}, "")[:2]
         assert text.strip() and sources == []
         assert client.calls == []
 
@@ -531,7 +598,7 @@ class Test_业务库执行器:
         """验证 amount_range 两个边界都缺时不查全表，而是要求至少给一个。"""
         client = _FakePgClient(data=[])
         _install(monkeypatch, "_get_postgres", client)
-        text, sources = TOOL_EXECUTORS["query_database"]({"query_type": "amount_range"}, "")
+        text, sources = TOOL_EXECUTORS["query_database"]({"query_type": "amount_range"}, "")[:2]
         assert text.strip() and sources == []
         assert client.calls == []
 
@@ -539,7 +606,7 @@ class Test_业务库执行器:
         """验证模型猜错 query_type 时回落到 search_by_keyword。"""
         client = _FakePgClient(data=[{"project_name": "某项目"}])
         _install(monkeypatch, "_get_postgres", client)
-        text, _ = TOOL_EXECUTORS["query_database"]({"query_type": "不存在的类型", "keyword": "空调"})
+        text, _ = TOOL_EXECUTORS["query_database"]({"query_type": "不存在的类型", "keyword": "空调"})[:2]
         assert "某项目" in text
 
     def test_不支持的粒度被收敛掉而不报错(self, monkeypatch):
@@ -552,22 +619,22 @@ class Test_业务库执行器:
     def test_空结果时按健康状态区分没连上还是没查到(self, monkeypatch):
         """验证同为空的两种原因给出不同文案。"""
         _install(monkeypatch, "_get_postgres", _FakePgClient(data=[], healthy=False))
-        down, _ = TOOL_EXECUTORS["query_database"]({"query_type": "location_dist"})
+        down, _ = TOOL_EXECUTORS["query_database"]({"query_type": "location_dist"})[:2]
         _install(monkeypatch, "_get_postgres", _FakePgClient(data=[], healthy=True))
-        empty, _ = TOOL_EXECUTORS["query_database"]({"query_type": "location_dist"})
+        empty, _ = TOOL_EXECUTORS["query_database"]({"query_type": "location_dist"})[:2]
         assert down != empty
 
     def test_统计总览的字典结果照常渲染(self, monkeypatch):
         """验证 stats_overview 返回单个 dict 时不被当成空结果丢掉。"""
         _install(monkeypatch, "_get_postgres", _FakePgClient(data={"total_records": 8746}))
-        text, sources = TOOL_EXECUTORS["query_database"]({"query_type": "stats_overview"})
+        text, sources = TOOL_EXECUTORS["query_database"]({"query_type": "stats_overview"})[:2]
         assert "8746" in text
         assert sources == []
 
     def test_业务库来源恒为空(self, monkeypatch):
         """验证业务库结果不进 sources。"""
         _install(monkeypatch, "_get_postgres", _FakePgClient(data=[{"project_name": "某项目"}]))
-        _, sources = TOOL_EXECUTORS["query_database"]({"query_type": "search_by_keyword", "keyword": "空调"})
+        _, sources = TOOL_EXECUTORS["query_database"]({"query_type": "search_by_keyword", "keyword": "空调"})[:2]
         assert sources == []
 
 
@@ -577,7 +644,7 @@ class Test_联网执行器:
     def test_未配置密钥时降级且不发请求(self, monkeypatch):
         """验证缺 TAVILY_API_KEY 时给出明确提示，而不是静默走免密通道。"""
         monkeypatch.setattr("src.web_search.is_configured", lambda: False)
-        text, sources = TOOL_EXECUTORS["search_web"]({"query": "2025年空调采购"})
+        text, sources = TOOL_EXECUTORS["search_web"]({"query": "2025年空调采购"})[:2]
         assert text.strip() and sources == []
         assert "TAVILY_API_KEY" in text
 
@@ -588,7 +655,7 @@ class Test_联网执行器:
             "src.web_search.web_search_client",
             _FakeWebSearchClient(error=RuntimeError("连接 10.0.0.5:8080 失败 secret-token")),
         )
-        text, sources = TOOL_EXECUTORS["search_web"]({"query": "2025年空调采购"})
+        text, sources = TOOL_EXECUTORS["search_web"]({"query": "2025年空调采购"})[:2]
         assert text.strip() and sources == []
         assert "10.0.0.5" not in text and "secret-token" not in text
 
@@ -596,11 +663,18 @@ class Test_联网执行器:
         """验证联网返回 0 条时给出"没搜到"类文案与空来源。"""
         monkeypatch.setattr("src.web_search.is_configured", lambda: True)
         monkeypatch.setattr("src.web_search.web_search_client", _FakeWebSearchClient({"results": [], "answer": ""}))
-        text, sources = TOOL_EXECUTORS["search_web"]({"query": "2025年空调采购"})
+        text, sources = TOOL_EXECUTORS["search_web"]({"query": "2025年空调采购"})[:2]
         assert text.strip() and sources == []
 
-    def test_正常搜索的来源严格四个键(self, monkeypatch):
-        """验证联网 sources 元素恰为 question/answer/score/url（对齐开发文档 §6.2）。"""
+    def test_正常搜索的来源字段契约(self, monkeypatch):
+        """验证联网 sources 元素的字段契约。
+
+        2026-10 起为**五个键**：`question`（标题）/ `answer`（正文）/ `score` /
+        `url` / `score_kind`。新增 `score_kind` 是有意的增量：
+        `engine` 引擎自带分与 `cosine` 本地补算分的**口径不同、不可横比**，
+        前端要据此提示用户（不标的话用户会拿 0.0001 的引擎分与 0.71 的
+        本地匹配度比较而得出错误结论）。
+        """
         monkeypatch.setattr("src.web_search.is_configured", lambda: True)
         monkeypatch.setattr(
             "src.web_search.web_search_client",
@@ -608,10 +682,10 @@ class Test_联网执行器:
                 {"results": [{"title": "公告", "url": "https://a.example", "content": "正文"}], "answer": "摘要"}
             ),
         )
-        text, sources = TOOL_EXECUTORS["search_web"]({"query": "2025年空调采购"}, "2025年空调采购")
+        text, sources = TOOL_EXECUTORS["search_web"]({"query": "2025年空调采购"}, "2025年空调采购")[:2]
         assert "摘要" in text and "https://a.example" in text
         assert len(sources) == 1
-        assert sorted(sources[0]) == ["answer", "question", "score", "url"]
+        assert sorted(sources[0]) == ["answer", "question", "score", "score_kind", "url"]
         assert sources[0]["url"] == "https://a.example"
 
     def test_未给query时回落到用户原始问题(self, monkeypatch):
@@ -628,7 +702,7 @@ class Test_联网执行器:
         package.__path__ = []
         monkeypatch.setitem(sys.modules, "src.mcp", package)
         monkeypatch.delitem(sys.modules, "src.mcp.web_search_exa", raising=False)
-        text, sources = TOOL_EXECUTORS["search_exa"]({"query": "语义搜索"})
+        text, sources = TOOL_EXECUTORS["search_exa"]({"query": "语义搜索"})[:2]
         assert text.strip() and sources == []
 
     def test_Exa就绪时能返回结果(self, monkeypatch):
@@ -640,9 +714,9 @@ class Test_联网执行器:
         module.exa_search_client = fake_client
         monkeypatch.setitem(sys.modules, "src.mcp", package)
         monkeypatch.setitem(sys.modules, "src.mcp.web_search_exa", module)
-        text, sources = TOOL_EXECUTORS["search_exa"]({"query": "语义搜索"})
+        text, sources = TOOL_EXECUTORS["search_exa"]({"query": "语义搜索"})[:2]
         assert "https://e.example" in text
-        assert sorted(sources[0]) == ["answer", "question", "score", "url"]
+        assert sorted(sources[0]) == ["answer", "question", "score", "score_kind", "url"]
 
     def test_Exa抛异常时降级且不抛异常(self, monkeypatch):
         """验证 Exa 客户端报错时吞掉异常并返回文案。"""
@@ -652,7 +726,7 @@ class Test_联网执行器:
         package.__path__ = []
         monkeypatch.setitem(sys.modules, "src.mcp", package)
         monkeypatch.setitem(sys.modules, "src.mcp.web_search_exa", module)
-        text, sources = TOOL_EXECUTORS["search_exa"]({"query": "语义搜索"})
+        text, sources = TOOL_EXECUTORS["search_exa"]({"query": "语义搜索"})[:2]
         assert text.strip() and sources == []
         assert "MCP" not in text
 
@@ -665,7 +739,7 @@ class Test_执行器统一契约:
         """验证任何执行器收到 {} 都返回 (str, list) 而不是抛异常。"""
         for factory in ("_get_rag_pipeline", "_get_neo4j", "_get_postgres"):
             _install(monkeypatch, factory, None)
-        text, sources = TOOL_EXECUTORS[name]({})
+        text, sources = TOOL_EXECUTORS[name]({})[:2]
         assert isinstance(text, str) and text.strip()
         assert isinstance(sources, list) and sources == []
 
@@ -674,7 +748,7 @@ class Test_执行器统一契约:
         """验证 arguments 传 None（tool_defense 解析出空参数时的形状）也能活下来。"""
         for factory in ("_get_rag_pipeline", "_get_neo4j", "_get_postgres"):
             _install(monkeypatch, factory, None)
-        text, sources = TOOL_EXECUTORS[name](None)
+        text, sources = TOOL_EXECUTORS[name](None)[:2]
         assert isinstance(text, str) and text.strip()
         assert isinstance(sources, list)
 
@@ -687,7 +761,7 @@ class Test_执行器统一契约:
         _install(monkeypatch, "_get_postgres", _FakePgClient(data=[{"project_name": "长" * 200}] * 50))
         # 密钥若真的配了，这一条会打真实 API——单元测试必须与网络解耦，固定成"未配置"
         monkeypatch.setattr("src.web_search.is_configured", lambda: False)
-        text, _ = TOOL_EXECUTORS[name]({"query": "空调", "keyword": "空调", "entity": "空调"})
+        text, _ = TOOL_EXECUTORS[name]({"query": "空调", "keyword": "空调", "entity": "空调"})[:2]
         assert len(text) <= MAX_OBSERVATION_CHARS + 1
 
     def test_注册的工具名与常量一致(self):
@@ -699,3 +773,121 @@ class Test_执行器统一契约:
     def test_TOOLS列表与执行器一一对应(self):
         """验证 TOOLS 导出的 BaseTool 子类名与执行器键名一一对应。"""
         assert sorted(tool.name for tool in rag_tools.TOOLS) == sorted(TOOL_EXECUTORS)
+
+
+class Test_透传图表契约:
+    """工具可以**可选地**多返回一个元素：结构化图表数据。
+
+    ★ 为什么需要这条契约测试
+    -------------------
+    改这条契约时（从"后端正则解析工具文本"改为"工具透传结构化数据"），
+    5 个既有用例因为按二元组解包而挂掉 —— 说明**返回长度是被隐式依赖的契约**。
+    故这里把它显式测出来：
+
+        · 产图表的工具 → 3 元组，第三项是 `list[dict]` 且结构正确
+        · 不产图表的工具 → 2 元组（不为它多返回空列表）
+        · 失败/空结果 → 2 元组（没有数据可画）
+
+    第三项的 schema 与 `charts.py` 的产出**必须一致**，否则前端要处理两种形状。
+    """
+
+    #: 已改造为透传的工具
+    _CHART_TOOLS = {
+        "query_database": {"query_type": "top_subject", "limit": 5},
+        "search_knowledge_graph": {"query_type": "top_traded", "limit": 5},
+    }
+
+    @pytest.mark.integration
+    def test_chart_tools_return_three_tuple(self):
+        for name, args in self._CHART_TOOLS.items():
+            out = TOOL_EXECUTORS[name](args)
+            assert len(out) == 3, f"{name} 应返回三元组（文本, 来源, 图表）"
+
+    @pytest.mark.integration
+    def test_chart_shape_matches_schema(self):
+        """★ 与 `charts.py` 产出的 schema 一致 —— 否则前端要处理两种形状。"""
+        from src.agent.charts import extract_charts
+
+        for name, args in self._CHART_TOOLS.items():
+            _, _, charts = TOOL_EXECUTORS[name](args)
+            if not charts:      # 库里可能没数据，此时不断言形状
+                continue
+            for c in charts:
+                assert isinstance(c, dict)
+                for key in ("kind", "title", "value_label", "label_label",
+                            "data", "note", "source_tool"):
+                    assert key in c, f"{name} 的图表缺字段 {key}"
+                assert c["kind"] == "bar"
+                assert isinstance(c["data"], list)
+                for item in c["data"]:
+                    assert set(item) == {"label", "value"}, (
+                        f"数据项只应有 label/value，实为 {sorted(item)}"
+                    )
+                    assert isinstance(item["value"], (int, float))
+            # 与非透传路径产出的键集合比对（两者的消费方是同一个前端组件）
+            ref = extract_charts("- a：1\n- b：2\n- c：3", "query_database")
+            if ref:
+                assert set(charts[0]) == set(ref[0]), "两条路径的图表键必须一致"
+
+    @pytest.mark.integration
+    def test_no_chart_tools_return_two_tuple(self):
+        """不产图表的工具不必多返回空列表 —— 契约是"可选第三项"。"""
+        for name, args in (("search_knowledge_base", {"query": "空调"}),
+                           ("search_web", {"query": "空调"})):
+            if name not in TOOL_EXECUTORS:
+                continue
+            out = TOOL_EXECUTORS[name](args)
+            assert len(out) == 2, f"{name} 应仍返回二元组"
+
+    def test_failure_path_returns_two_tuple(self):
+        """失败结果没有数据可画，返回二元组。
+
+        ★ 这条很重要：调用方若一律按三元组解包，**失败路径会 ValueError** ——
+        而失败路径恰恰是最需要稳定的时候。
+        """
+        out = TOOL_EXECUTORS["query_database"]({"query_type": "top_subject",
+                                               "group_by": "不存在的粒度"})
+        assert len(out) >= 2, "失败路径至少要能解出文本与来源"
+
+    def test_dispatch_accepts_both_lengths(self):
+        """工具返回值两种长度都要认 —— 这是「可选第三项（图表）」能成立的前提。
+
+        ★ 改法说明（2026-10-16）
+        ----------------------
+        原来用**源码字符串**断言（`inspect.getsource(_execute_tool)` 里必须有
+        `len(result) == 3`）。工具改为并行执行后，解包逻辑搬到了
+        `_execute_tool_ex`（`_execute_tool` 变成写回实例属性的兼容入口），
+        字符串断言随之失效 —— 那次失败是**测试抓对了变化**，不是回归。
+
+        这里改成断言**行为**：装上返回三元组的执行器，就必须拿到图表；
+        返回二元组的执行器，图表为空且不报错。行为断言比源码断言强：
+        它不管实现怎么搬，只管契约有没有被破坏。
+        """
+        import src.agent.core as core_mod
+        import src.agent.react_loop as loop_mod
+        from src.agent import BiddingAgent
+
+        original_loop = loop_mod.TOOL_EXECUTORS
+        original_core = core_mod.TOOL_EXECUTORS
+        try:
+            executors = {
+                "with_charts": lambda arguments, question="": (
+                    "文本", [{"question": "q", "answer": "a"}],
+                    [{"type": "bar", "name": "图", "data": []}],
+                ),
+                "without_charts": lambda arguments, question="": ("文本", []),
+            }
+            loop_mod.TOOL_EXECUTORS = executors
+            core_mod.TOOL_EXECUTORS = executors
+            agent = BiddingAgent(llm_client=None)  # type: ignore[arg-type]
+
+            text3, sources3, ok3, obs3 = agent._execute_tool_ex("with_charts", {})
+            assert ok3 is True and text3 == "文本" and sources3, "三元组未被正确解包"
+            assert obs3["charts"], "三元组里的图表必须透传出来"
+
+            text2, _sources2, ok2, obs2 = agent._execute_tool_ex("without_charts", {})
+            assert ok2 is True and text2 == "文本", "二元组仍须支持"
+            assert obs2["charts"] == [], "二元组没有图表数据，应为空而不是报错"
+        finally:
+            loop_mod.TOOL_EXECUTORS = original_loop
+            core_mod.TOOL_EXECUTORS = original_core

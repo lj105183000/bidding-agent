@@ -102,9 +102,16 @@ def build_paraphrases(entries: list[dict], refresh: bool = False) -> list[str]:
             return cached
 
     from src.clients.llm_factory import get_llm_client
+    from src.config import settings
 
-    client = get_llm_client()
-    if not client.available():
+    # `provider` 是必填参数（工厂按 provider 决定建哪个客户端，没有合理默认值）。
+    # 与 pipeline.py 保持一致：用 settings.llm_provider，空值回落到 deepseek。
+    #
+    # ⚠️ 这里曾漏传该参数导致 `--query-style paraphrase` 直接抛
+    # `TypeError: get_llm_client() missing 1 required positional argument`，
+    # 整个改写路径不可用——而 exact/keyword 两档不走这里，所以问题不容易被发现。
+    client = get_llm_client((settings.llm_provider or "deepseek").strip())
+    if client is None or not client.available():
         raise SystemExit("改写查询需要 LLM 凭据；或改用 --query-style exact/keyword")
 
     questions = [e["question"] for e in entries]
@@ -113,7 +120,11 @@ def build_paraphrases(entries: list[dict], refresh: bool = False) -> list[str]:
     for start in range(0, len(questions), batch_size):
         batch = questions[start : start + batch_size]
         items = "\n".join(f"{i + 1}. {q}" for i, q in enumerate(batch))
-        reply = client.chat(
+        # 用 `chat_raw`（返回完整字符串）而不是流式：改写结果要一次性解析成表格。
+        # 客户端接口是 `chat_raw` / `chat_stream` / `chat_stream_thinking`，
+        # **没有** `chat`——早期版本的 `chat` 已改名，这里曾没跟上，导致
+        # `AttributeError: 'OpenAICompatibleClient' object has no attribute 'chat'`。
+        reply = client.chat_raw(
             [{"role": "user", "content": _PARAPHRASE_PROMPT.format(items=items)}]
         )
         parsed: dict[int, str] = {}
@@ -237,29 +248,78 @@ def apply_mode(mode: str, query: str, candidates: list[dict]) -> list[dict]:
 
 
 def score(retriever: Retriever, mode: str, style: str, top_k: int, limit: int) -> dict:
+    """算检索质量。**分母一律是全部题数**，未召回的题按"未命中"计入。
+
+    ★ 为什么必须区分 in_pool / not_in_pool（原先只有一个 topk，分不出来）
+    ---------------------------------------------------------------
+    `topk = 0.92` 有两种**修法完全相反**的成因：
+
+        a) 8% 的题排在前 k 名之外，但在候选池里
+           → 加密 k 或调权重能救
+        b) 8% 的题**根本没进候选池**
+           → 调 k 没用，要查索引 / 切分 / 嵌入
+
+    原实现把这两种都折进 `continue`（不进 `ranks`）而不单独报，
+    于是看到 0.92 不知道该调哪个。故现在把
+    `not_in_pool`（连池子都没进）单独报出来。
+
+    ★ recall@k 曲线与候选池深度的关系
+    ---------------------------
+    `candidates()` 只取前 `CANDIDATE_K`（20）条，故 **k >= 20 时
+    recall 必然饱和为 1.0** —— 那不是"检索完美"，是"池子里就那么多"。
+    故曲线只报到 `min(CANDIDATE_K, 上限)`，并在返回值里给 `pool_size`，
+    让调用方能判断"这个 k 还有没有信息量"。
+    """
     entries = retriever.entries[:limit] if limit else retriever.entries
     queries = build_queries(entries, style)
 
-    hits_top1 = hits_topk = 0
     ranks: list[int] = []
+    not_in_pool = 0
+    pool_size = 0
     started = time.perf_counter()
 
     for entry, query in zip(entries, queries):
         gold = entry["question"]
-        ordered = apply_mode(mode, query, retriever.candidates(style, query))
+        pool = retriever.candidates(style, query)
+        pool_size = max(pool_size, len(pool))
+        if not any(c["question"] == gold for c in pool):
+            # 连候选池都没进 —— 与"进了池子但排名靠后"是**不同的问题**
+            not_in_pool += 1
+            continue
+        ordered = apply_mode(mode, query, pool)
         rank = next((i + 1 for i, c in enumerate(ordered) if c["question"] == gold), None)
-        if rank is None:
+        if rank is None:  # 理论上不会（池子里有）；保险
+            not_in_pool += 1
             continue
         ranks.append(rank)
-        hits_top1 += rank == 1
-        hits_topk += rank <= top_k
 
     total = len(entries)
+    if total == 0:
+        return {
+            "n": 0, "top1": 0.0, "topk": 0.0, "mrr": 0.0,
+            "recall_at": {}, "not_in_pool": 0, "in_pool_rate": 0.0,
+            "mean_rank": None, "median_rank": None, "pool_size": 0,
+            "candidate_k": CANDIDATE_K, "seconds": time.perf_counter() - started,
+        }
+
+    # ★ recall@k：分母是**全部题**（不是 len(ranks)）——
+    #   未召回的题贡献 0，否则会算出"完美召回"的假象。
+    ks = [k for k in (1, 3, 5, 10) if k <= max(CANDIDATE_K, 1)]
+    recall_at = {k: sum(1 for r in ranks if r <= k) / total for k in ks}
+
     return {
         "n": total,
-        "top1": hits_top1 / total,
-        "topk": hits_topk / total,
-        "mrr": sum(1 / r for r in ranks) / total if ranks else 0.0,
+        "top1": sum(1 for r in ranks if r == 1) / total,
+        "topk": sum(1 for r in ranks if r <= top_k) / total,
+        "mrr": sum(1 / r for r in ranks) / total,
+        "recall_at": recall_at,
+        # 连候选池都没进的题数（与"进了但排序靠后"区分开）
+        "not_in_pool": not_in_pool,
+        "in_pool_rate": (total - not_in_pool) / total,
+        "mean_rank": (sum(ranks) / len(ranks)) if ranks else None,
+        "median_rank": (sorted(ranks)[len(ranks) // 2] if ranks else None),
+        "pool_size": pool_size,
+        "candidate_k": CANDIDATE_K,
         "seconds": time.perf_counter() - started,
     }
 
@@ -294,19 +354,37 @@ def main() -> int:
         print(f"精排模型已加载（生产开关 RERANK_ENABLED={int(settings.rerank_enabled)}）")
     print()
 
-    header = f"{'查询风格':<12}{'策略':<20}{'Top-1':>7}{'Top-' + str(args.top_k):>8}{'MRR':>8}{'耗时':>9}"
+    # ★ 加两列：`池外` 与 `Recall@5`。
+    #
+    # 为什么：原先只有 Top-1 / Top-k / MRR，看到"Top-5 = 92%"分不出那 8%
+    # 是"排在第 6"还是"连候选池都没进"—— 两者修法完全相反（调 k vs 查索引）。
+    # `池外` 就是那个区分量；`Recall@5` 给出曲线上的一个点。
+    header = (
+        f"{'查询风格':<12}{'策略':<20}{'Top-1':>7}{'Top-' + str(args.top_k):>8}"
+        f"{'Recall@5':>10}{'MRR':>8}{'池外':>6}{'耗时':>9}"
+    )
     print(header)
-    print("-" * 64)
+    print("-" * 84)
     for style in styles:
         for mode in modes:
             result = score(retriever, mode, style, args.top_k, args.limit)
+            r5 = result["recall_at"].get(5)
+            r5_s = f"{r5:>10.1%}" if r5 is not None else f"{'—':>10}"
             print(
                 f"{style:<12}{mode:<20}{result['top1']:>7.1%}{result['topk']:>8.1%}"
-                f"{result['mrr']:>8.3f}{result['seconds']:>8.1f}s"
+                f"{r5_s}{result['mrr']:>8.3f}{result['not_in_pool']:>6}{result['seconds']:>8.1f}s"
             )
         print()
 
     print("提示：exact 风格几乎等于原文查询，命中率高且无区分度；策略差异主要看 keyword 档。")
+    print(
+        f"说明：「池外」= 连候选池（前 {CANDIDATE_K} 条）都没进的题数 —— "
+        "它>0 说明问题在索引/切分/嵌入，而不是排序参数。"
+    )
+    print(
+        f"      Recall@k 在 k >= {CANDIDATE_K} 时**必然饱和为 100%**"
+        "（池子里就那么多），故只报到 k=10，不报更大的 k。"
+    )
     return 0
 
 

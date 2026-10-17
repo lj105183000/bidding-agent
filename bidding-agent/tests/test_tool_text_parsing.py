@@ -31,7 +31,18 @@ class ScriptedLLM:
 
 
 def _install_executors(monkeypatch, mapping):
-    registry = dict(mapping)
+    """安装 fake 执行器。
+
+    统一包装成 `(arguments, question="")` 签名：`_execute_tool` 现在会把
+    用户原问题传给执行器（联网工具据此重排并补算相关度），
+    而这里的 fake 只关心 arguments。
+    """
+    def wrap(fn):
+        def wrapper(arguments, question=""):
+            return fn(arguments)
+        return wrapper
+
+    registry = {name: wrap(fn) for name, fn in mapping.items()}
     monkeypatch.setattr(core_mod, "TOOL_EXECUTORS", registry)
     monkeypatch.setattr(loop_mod, "TOOL_EXECUTORS", registry)
 
@@ -138,7 +149,7 @@ def test_chat_resets_answer_on_leak(monkeypatch):
         stream_chunks=[f'根据查询结果：{leak}'],
     )
     _install_executors(monkeypatch, {
-        "search_knowledge_graph": lambda args: ("图谱结果", []),
+        "search_knowledge_graph": lambda args, question="": ("图谱结果", []),
     })
     agent = BiddingAgent(llm_client=fake)
 

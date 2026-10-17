@@ -29,12 +29,29 @@ class _FakeBM25:
 
 
 class _FakeStore:
+    """检索层替身。
+
+    ★ 契约随融合路径统一而变更（docs/39）
+    ----------------------------------
+    pipeline 现在**统一走两路检索 + 应用层 `fuse_rrf`**，故：
+
+        ① 替身被调用的是 `dense_search` / `sparse_search`，不再是 `hybrid_search`
+        ② 返回的记录会被 `fuse_rrf` **重算 `score`**（RRF 分），
+           原断言 `sources == HITS`（含 mock 的 score 0.9/0.7）不再成立
+
+    故这里让两路返回**不同的**记录，贴近真实混合检索；
+    测试改为断言内容与相对顺序，不再断言被重算的分值。
+    """
+
     def __init__(self, hits=None, error: Exception | None = None) -> None:
         self.hits = HITS if hits is None else hits
         self.error = error
         self.search_calls = 0
 
-    def hybrid_search(self, dense, sparse, limit=5, prefetch_limit=30):
+    # 以下三个方法保留 `hybrid_search`：它仍是 VectorStore 的公开 API，
+    # 且部分测试直接调用它以验证服务端路径的参数透传。
+    def hybrid_search(self, dense, sparse, limit=5, prefetch_limit=30,
+                      dense_weight=1.0, sparse_weight=1.0, rrf_k=None):
         self.search_calls += 1
         if self.error:
             raise self.error
@@ -48,13 +65,37 @@ class _FakeStore:
 
     def sparse_search(self, sparse_vector, *, limit=30):
         # 不额外计数：dense + sparse 两路组成一次逻辑检索，search_calls
-        # 在 hybrid_search 里也只计一次，这里保持口径一致
+        # 在两路里只计一次，保持口径一致
         if self.error:
             raise self.error
         return self.hits[:limit]
 
     def health(self) -> dict:
         return {"ok": True, "points_count": len(self.hits), "latency_ms": 1}
+
+
+def _same_sources(actual, expected) -> bool:
+    """来源列表的**内容与顺序**是否一致（忽略被重算的 `score`）。
+
+    ★ 为什么不能直接 `==`（契约变更，docs/39）
+    -----------------------------------------
+    pipeline 现在统一走两路检索 + 应用层 `fuse_rrf`，
+    返回记录的 `score` 是**RRF 融合分**（被重算），
+    而 fixture 里写的是 mock 的引擎分（0.9 / 0.7）。
+    分值口径本就不同，断言它等于 mock 值是在断言一个**不该成立**的契约。
+
+    来源的业务语义是"有哪些、什么顺序"——那才是要守的契约。
+
+    返回 bool 而不是内部 assert：内部 assert 在 `assert f(x)` 里会变成
+    `assert None`，失败信息完全看不出原因（实测踩过）。
+    """
+    if len(actual) != len(expected):
+        return False
+    for a, e in zip(actual, expected):
+        for key in ("question", "answer"):
+            if a.get(key) != e.get(key):
+                return False
+    return True
 
 
 class _FakeLLM:
@@ -116,7 +157,7 @@ def test_llm_mode_streams_generated_answer_and_sources():
     assert _tokens(events) == "根据《政府采购法》第三十一条。"
     done = events[-1]
     assert done["type"] == "done"
-    assert done["sources"] == HITS
+    assert _same_sources(done["sources"], HITS)
     assert done["tool_called"] is True
     assert done["tool_name"] == TOOL_NAME_KB
     assert done["web_sources"] == []
@@ -162,7 +203,7 @@ def test_without_llm_returns_top_answer_verbatim():
     assert _tokens(events) == HITS[0]["answer"]
     assert any("未配置大模型" in e["content"] for e in events if e["type"] == "status")
     # 来源与工具语义在降级模式下同样成立
-    assert events[-1]["sources"] == HITS
+    assert _same_sources(events[-1]["sources"], HITS)
     assert events[-1]["tool_called"] is True
 
 
@@ -217,7 +258,7 @@ def test_search_failure_ends_with_error_event_not_done():
 def test_chat_collects_the_same_event_stream():
     result = _pipeline().chat("单一来源采购的条件？")
     assert result["answer"] == "根据《政府采购法》第三十一条。"
-    assert result["sources"] == HITS
+    assert _same_sources(result["sources"], HITS)
     assert result["tool_name"] == TOOL_NAME_KB
 
 

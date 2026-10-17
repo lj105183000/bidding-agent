@@ -51,13 +51,17 @@ class Settings:
 
     # ---- DeepSeek（feat/api-llm 引入，逐请求 provider 选项） ----
     deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
-    deepseek_model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+    deepseek_model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-flash")
     deepseek_base_url: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
     deepseek_thinking_model: str = os.getenv("DEEPSEEK_THINKING_MODEL", "")
 
     # ---- 智谱 ----
     zhipu_api_key: str = os.getenv("ZHIPU_API_KEY", "")
     zhipu_model: str = os.getenv("ZHIPU_MODEL", "glm-4.7-flashx")
+    # 视觉模型：前端「附件」上传图片后由它解析。
+    # glm-4.6v-flashx 经实测可用：项目编号 / 预算金额 / 时间等关键字段识别正确，
+    # 与 glm-5.3-flashx 在同一测试图上能力相当。
+    # 实测其他可用值：glm-5.3-flashx / glm-5.3-flash / glm-4v-flash。
     zhipu_vision_model: str = os.getenv("ZHIPU_VISION_MODEL", "glm-4.6v-flashx")
     zhipu_thinking_model: str = os.getenv("ZHIPU_THINKING_MODEL", "")
 

@@ -16,7 +16,105 @@
   }
 }
 
-/* 滚动条美化: 宽 6px, thumb #CBD5E1, 圆角 */
+/* ==========================================================================
+   移动端适配
+   ==========================================================================
+   设计前提：这是**桌面优先**的后台系统（13 个导航项、12 个数据密集页面），
+   移动端不是"缩小版桌面"，而是另一套交互形态：
+
+       导航   左侧图标栏 → 底部导航栏 + 抽屉
+       排版   多列网格   → 单列
+       表格   宽表       → 卡片（横滑只用于确实等宽的短表）
+       图表   固定高度   → 按容器宽自适应
+       交互   hover 提示 → 触控目标 ≥44px（无 hover 可用）
+*/
+
+@layer utilities {
+  /* --- 安全区：刘海屏 / Home 指示条 ---
+     env() 在不支持的环境下取不到值，故给 0px 兜底——
+     不兜底会让 padding 计算式整体失效（某些浏览器把无效值丢弃）。
+     用法：底部导航用 .pb-safe，全屏浮层用 .p-safe */
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  .pt-safe {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+  .px-safe {
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+  }
+  /* 底部导航自身的高度 + 安全区，供内容区做避让（避免最后一段内容被盖住） */
+  .pb-nav-safe {
+    padding-bottom: calc(4rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* --- 触控目标 ---
+     移动端没有 hover，点击精度也远低于鼠标。Apple HIG 建议 ≥44pt、
+     Material 建议 ≥48dp。这里统一给到 44px 最小边长。
+     只在触屏（粗指针）生效：桌面端保持紧凑，不牺牲信息密度。 */
+  @media (pointer: coarse) {
+    .touch-target {
+      min-height: 44px;
+      min-width: 44px;
+    }
+    /* 触屏上 hover 样式会"粘住"（点过之后一直保持 hover 态），
+       故关闭依赖 hover 的浮起效果，改为按下时反馈。 */
+    .card:hover {
+      box-shadow: none;
+    }
+    .card:active {
+      @apply shadow-sm;
+    }
+  }
+
+  /* --- iOS 输入框缩放 ---
+     iOS Safari 在 input/textarea 字号 <16px 时会**自动放大页面**，
+     且放大后不会自动缩回，用户会卡在一个错位的视图里。
+     用 16px 解决；同时显式关掉 textarea 的手动缩放句柄。 */
+  @media (max-width: 1023px) {
+    input,
+    textarea,
+    select {
+      font-size: 16px;
+    }
+    textarea {
+      resize: none;
+    }
+  }
+
+  /* --- 横向滚动容器 ---
+     宽表/长代码在手机上必须能横滑，但不能让**整页**跟着横滑
+     （整页横滑会让固定定位的导航错位）。
+     用法：给外层加 .scroll-x，内部表格保持自然宽度。 */
+  .scroll-x {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+  }
+}
+
+/* --- 全局：禁止整页横向溢出 ---
+   移动端最常见的"页面能左右晃"就是某个固定宽度子元素撑破了容器。
+   `overflow-x: hidden` 加在 html/body 上兜底，具体元素仍应自己收敛宽度。 */
+html,
+body {
+  overflow-x: hidden;
+  /* 触屏点击时不显示灰色高亮块（Android Chrome 默认行为） */
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* --- 移动端滚动条 ---
+   桌面那套 6px 美化滚动条在触屏上没必要，且会占掉本就很窄的宽度。 */
+@media (pointer: coarse) {
+  ::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+  }
+}
+
+/* 滚动条美化: 宽 6px, thumb #CBD5E1, 圆角
+   （触屏上由上面的 pointer:coarse 规则覆盖为 0，不占本就狭窄的宽度） */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -30,6 +128,21 @@
 }
 ::-webkit-scrollbar-thumb:hover {
   background: #94a3b8;
+}
+
+/* --- 尊重"减少动态效果"偏好 ---
+   iOS/Android 都有该无障碍开关（前庭功能障碍用户会因动画不适）。
+   只关掉装饰性动画，不关功能性状态切换。 */
+@media (prefers-reduced-motion: reduce) {
+  .page-fade {
+    animation: none;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 /* 页面切换 150ms 淡入 */
