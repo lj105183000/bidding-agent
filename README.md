@@ -24,8 +24,8 @@
 | LLM | DeepSeek / 智谱 GLM / vLLM·Ollama（OpenAI 兼容）/ 视觉模型 |
 | 数据 | Neo4j 知识图谱 · PostgreSQL 会话与反馈 · Qdrant 向量库 |
 | 联网 | Tavily API · Exa MCP（自研 stdio JSON-RPC 客户端） |
-| 前端 | React 18 · TypeScript · Vite 5 · Redux Toolkit |
-| 测试 | pytest（561 例）· Vitest |
+| 前端 | React 18 · TypeScript · Vite 5 · Tailwind CSS · Recharts · React Router |
+| 测试 | pytest（3165 例，其中 4 项默认排除）· Vitest |
 
 ## 快速开始
 
@@ -87,33 +87,54 @@ uv run uvicorn api.server:app --host 0.0.0.0 --port 8001
 ## 仓库结构
 
 ```
-├── frontend/                    # ★ 前端（React 18 + Vite 5，:5173）
+├── frontend/                        # ★ 前端（React 18 + Vite 5，:5173）
 │   └── src/
-│       ├── pages/               # Chat（已接后端）/ Dashboard / Extract / PriceCompare / Material / Analysis
-│       └── lib/api.ts           # SSE 网络层，直连后端 :8001
-├── bidding-agent/               # ★ 后端（FastAPI，:8001）
-│   ├── main.py                  # CLI 入口：ingest / api / dev
-│   ├── api/server.py            # 全部端点 + 限流 + lifespan
+│       ├── pages/                   # 14 个业务页面（Chat / Dashboard / KnowledgeGraph / GraphViz
+│       │                            #   / Extract / TenderDoc / Compare / Qualification / Compliance
+│       │                            #   / Deadline / PriceCompare / Material / Analysis / EvalDashboard）
+│       ├── components/              # 通用组件（答案图表 / 力导向图 / 来源列表 / 微条形图 / 移动端导航）
+│       ├── lib/                     # api.ts（SSE 网络层，直连 :8001）/ evalApi.ts / chartStyles.ts / pdf.ts
+│       ├── contexts/                # 全局状态（模型选择，localStorage 持久化）
+│       └── hooks/                   # useMediaQuery / useStableCallback
+├── bidding-agent/                   # ★ 后端（FastAPI，:8001）
+│   ├── main.py                      # CLI 入口：ingest / api / dev
+│   ├── api/server.py                # 全部端点 + 限流 + lifespan
 │   ├── src/
-│   │   ├── agent/               # Agent 编排（ReAct 循环 / 生成 / 工具防泄漏 / 技能 / 提示词）
-│   │   ├── rag/                 # 混合检索 + 精排 + ingest
-│   │   ├── clients/             # LLM 客户端（deepseek / zhipu / openai_compatible / vision）
-│   │   ├── tools/               # 工具定义与并行执行（4 线程 / 30s 超时 / 异常隔离）
-│   │   ├── database/            # Neo4j / PostgreSQL 客户端
-│   │   └── mcp/                 # Exa MCP 客户端
-│   ├── tests/                   # pytest 561 例
-│   ├── eval/                    # RAG / Agent 评测
-│   ├── batch/                   # 数据处理脚本
-│   └── docs/                    # 开发文档 / 技术栈 / 组件工作机制
-├── CLAUDE.md / AGENTS.md        # AI 编码助手工作指引
-└── 招投标采购Agent项目讲解/       # 教学素材（非项目代码）
+│   │   ├── agent/                   # Agent 编排（ReAct 循环 / 生成 / 工具防泄漏 / 质量判定 / 答案核对）
+│   │   ├── rag/                     # 混合检索（稠密 + 稀疏 + RRF）/ 精排 / ingest / 计时
+│   │   ├── clients/                 # LLM 客户端 + 厂商级降级与分档冷却（failover_policy）
+│   │   ├── tools/                   # 工具定义与并行执行
+│   │   ├── services/                # 业务服务（合规检查 / 资格审查 / 法规库 / 比价 / 提取）
+│   │   ├── skills/                  # 技能（按 triggers 匹配，5 个）
+│   │   ├── database/                # Neo4j / PostgreSQL 客户端
+│   │   ├── eval_online/             # 在线评测：信号采集与聚合
+│   │   ├── eval_offline/            # 离线评测快照（供 /api/eval/offline）
+│   │   ├── mcp/                     # Exa MCP 客户端
+│   │   ├── health.py                # 健康检查（live/ready/deep 三档 + 组件可配 + 探测缓存）
+│   │   ├── monitoring.py            # 指标（分位延迟 / 分端点慢阈值 / 阶段耗时聚合）
+│   │   ├── log_redaction.py         # 日志出口脱敏（密钥 / JWT / 手机号 / 身份证 / 邮箱 / URL 参数）
+│   │   ├── api_access.py            # /api/logs、/api/metrics 访问控制
+│   │   └── langfuse_tracing.py      # 链路追踪（可选依赖）
+│   ├── tests/                       # pytest 3165 例（3158 passed / 3 skipped / 4 deselected）
+│   ├── eval/                        # 分线评测：agent / retrieval / rag 三线共 20 项指标
+│   ├── batch/                       # 数据处理脚本
+│   └── docs/                        # 开发文档 / 技术栈 / 组件工作机制
+├── docs/superpowers/                # 设计与实施记录（plans / specs）
+├── reference/                       # 参考数据（问答样例 / 标讯样例）
+├── scripts/                         # 启动与运维脚本
+├── .github/workflows/               # CI / 评测门禁 / 安全检查
+├── CLAUDE.md / AGENTS.md            # AI 编码助手工作指引
+└── docker-compose.yml               # 本地编排（另有 docker-compose.cloud.yml）
 ```
+
+> 说明：`bidding-agent/.github/` 是早期的旧工作流副本，实际生效的是仓库根的
+> `.github/workflows/`（GitHub Actions 只读取仓库根）。
 
 ## 文档地图
 
 | 文档 | 定位 |
 |---|---|
-| `bidding-agent/分配说明.md` | **团队协作入口**：5 人分工、Git 流程、接口契约、联调计划 |
+| `bidding-agent/docs/开发文档.md` | **面向开发者**：环境、数据管道、API 契约、测试、部署、排障（最全，优先查） |
 | `bidding-agent/docs/开发文档.md` | 面向开发者：环境、数据管道、API 契约、测试、部署、排障（最全） |
 | `bidding-agent/docs/技术栈.md` | 选型与版本锁定、版本兼容性踩坑注记 |
 | `bidding-agent/docs/组件工作机制.md` | 20 个组件的 Mermaid 机制图解 |
@@ -132,4 +153,4 @@ uv run uvicorn api.server:app --host 0.0.0.0 --port 8001
 | `feat/api-llm` | API 服务与 LLM 客户端 |
 | `feat/frontend` | 前端 |
 
-提交信息格式：`类型(模块): 中文描述`，类型取 `feat / fix / docs / test / chore`。详细分工与排期见 `bidding-agent/分配说明.md`。
+提交信息格式：`类型(模块): 中文描述`，类型取 `feat / fix / docs / test / chore`。提交前请先本地跑通 `uv run pytest -q` 与 `npm run build`。

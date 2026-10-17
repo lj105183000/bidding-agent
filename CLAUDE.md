@@ -20,22 +20,18 @@ C:\Users\10518\bidding-agent\
 ├── CLAUDE.md                    # ← 本文件
 ├── bidding-agent/               # ★ 真正的项目（5 人协作，代码将在这里落地）
 │   ├── README.md                # 面向使用者：功能概览、快速开始
-│   ├── 分配说明.md               # 面向团队：5 人分工、Git 流程、阶段排期（协作唯一入口）
 │   └── docs/
 │       ├── 开发文档.md           # 面向开发者：环境/数据管道/API 契约/测试/部署/排障（最全，优先查）
 │       ├── 技术栈.md             # 选型与版本锁定、版本兼容性踩坑注记
 │       ├── 组件工作机制.md        # 20 个组件的 Mermaid 机制图解（理解"怎么跑"看这份）
 │       └── 增加Agent功能.md       # 二期功能清单
-└── 招投标采购Agent项目讲解/        # 教学素材，不是项目代码
-    ├── 01_环境管理/ 02_AI编程/     # PDF 教程
-    ├── 03_项目参考/               # ⚠️ 与 bidding-agent/docs/ 同源的快照副本，两边会分叉
-    └── 04_Agent模式/              # 独立的 Agent 模式教学示例（见下）
+└── frontend/                    # 前端（React 18 + Vite 5）
 ```
 
-**两个易踩的坑**：
-
-1. `招投标采购Agent项目讲解/03_项目参考/` 是 `bidding-agent/docs/` 的副本快照，内容相同但**会随时间分叉**。改文档改 `bidding-agent/docs/`，不要改副本。
-2. `招投标采购Agent项目讲解/04_Agent模式/01_agent_inference/` 是一个**完全独立的**教学小仓库（8 个自包含的 Agent 模式单文件），有自己的 `CLAUDE.md`、`pyproject.toml`、`uv.lock`。它与招投标 Agent 项目**无任何 import 或依赖关系**，改动时不要跨目录复制代码。
+> 已从仓库移除：`招投标采购Agent项目讲解/`（教学素材）与 `bidding-agent/分配说明.md`
+> （团队分工文档）。它们不随代码分发，故不再出现在结构树里；
+> 若手上有旧副本，注意其中的 `03_项目参考/` 是 `bidding-agent/docs/` 的历史快照，
+> 改文档一律改 `bidding-agent/docs/`。
 
 ## 常用命令
 
@@ -134,7 +130,7 @@ src/config.py       Settings dataclass，__post_init__ 校验必需项，缺失�
 - **提交信息**：`类型(模块): 描述`，类型取 `feat / fix / docs / test / chore`，**描述用中文**，说明"做了什么 + 为什么"。
 - PR 要求：CI 全绿 + 至少 1 人 review；推荐 **Squash and merge**。
 - 冲突处理：`git pull origin main` 本地解决 → commit → push；**绝不 `--force` 覆盖他人分支**。
-- 分工明细与阶段排期见 `bidding-agent/分配说明.md`。
+- 分工明细与阶段排期文档已从仓库移除；如需补充，请放在 `bidding-agent/docs/` 下。
 
 ## 文档同步义务
 
