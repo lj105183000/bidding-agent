@@ -32,6 +32,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 import logging
 import os
 import queue
@@ -112,6 +113,11 @@ class OnlineEvaluator:
         self.write_errors = 0
         self.judge_sampled = 0
         self.judge_failed = 0
+        self.judge_ok = 0
+        self.judge_dropped = 0
+        #: 裁判专用队列与线程（与写盘队列**分开**：判分慢，不能拖住落盘）
+        self._jq: queue.Queue = queue.Queue(maxsize=QUEUE_MAXSIZE)
+        self._judge_worker: threading.Thread | None = None
 
     @property
     def path(self) -> Path:
@@ -155,7 +161,8 @@ class OnlineEvaluator:
     # --- 请求路径（必须极快、绝不阻塞）---
 
     def maybe_record(self, meta: dict, done: dict, *, question: str = "",
-                     has_history: bool = False) -> None:
+                     has_history: bool = False, answer: str = "",
+                     sources: list | None = None) -> None:
         """在请求结束时调用。**永不抛异常、永不阻塞**。
 
         只做三件事：判断是否采样 → 提取指标（纯函数）→ 丢进队列。
@@ -186,11 +193,17 @@ class OnlineEvaluator:
                 return
             if not is_evaluable(row):
                 return
+            # ★ 稳定 id：把异步算出的裁判分数关联回这一行
+            sample_id = uuid.uuid4().hex[:12]
+            row["sample_id"] = sample_id
             self._ensure_worker()
             try:
                 self._q.put_nowait(row)
                 with self._lock:
                     self.accepted += 1
+                # 基础行已入队 → 再决定是否送裁判。
+                # 放在 put 成功之后：被丢弃的样本不该产生裁判调用（那会白花钱）。
+                self._maybe_judge(sample_id, question, answer, sources)
             except queue.Full:
                 # ★ 满了一律丢弃：在线采样丢几条无妨，
                 # 阻塞请求或无限堆积内存不可接受
@@ -198,6 +211,85 @@ class OnlineEvaluator:
                     self.dropped += 1
         except Exception:  # noqa: BLE001 - 评测绝不能影响请求
             logger.debug("在线评测采样失败（不影响请求）", exc_info=True)
+
+    # --- 逐轮裁判（RAGAS 风格 faithfulness / relevancy）---
+
+    def _maybe_judge(self, sample_id: str, question: str, answer: str,
+                     sources: list | None) -> None:
+        """按 `RAGAS_ONLINE_EVAL_JUDGE_RATE` 决定这一轮是否送裁判。**永不抛异常**。
+
+        文本只进队列，由裁判线程用完即弃；磁盘只落分数。
+        """
+        try:
+            rate = self.judge_rate()
+            if rate <= 0:
+                return
+            if rate < 1.0 and random.random() >= rate:
+                return
+            task = {
+                "sample_id": sample_id,
+                "question": question,
+                "answer": answer,
+                "sources": sources or [],
+            }
+            self._ensure_judge_worker()
+            try:
+                self._jq.put_nowait(task)
+                with self._lock:
+                    self.judge_sampled += 1
+            except queue.Full:
+                with self._lock:
+                    self.judge_dropped += 1
+        except Exception:  # noqa: BLE001 - 判分排队失败绝不能影响请求
+            logger.debug("在线裁判排队失败", exc_info=True)
+
+    def _ensure_judge_worker(self) -> None:
+        if self._judge_worker is not None:
+            return
+        with self._lock:
+            if self._judge_worker is not None:
+                return
+            self._judge_worker = threading.Thread(
+                target=self._judge_run, name="online-eval-judge", daemon=True
+            )
+            self._judge_worker.start()
+
+    def _judge_run(self) -> None:
+        """裁判线程：取任务 → 判分 → 追加"只含分数"的记录。"""
+        from src.eval_online.judge import judge_turn
+
+        while not self._stop.is_set():
+            try:
+                task = self._jq.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            try:
+                res = judge_turn(
+                    question=task.get("question", ""),
+                    answer=task.get("answer", ""),
+                    sources=task.get("sources"),
+                )
+                record = {
+                    "kind": "judge",
+                    "sample_id": task.get("sample_id", ""),
+                    "judge_model": res.get("judge_model", ""),
+                    "faithfulness": res.get("faithfulness"),
+                    "relevancy": res.get("relevancy"),
+                    "judge_error": (res.get("error") or "")[:200],
+                }
+                # ★ 只写分数，绝不写 question/answer/sources
+                self._append(record)
+                with self._lock:
+                    if res.get("ok"):
+                        self.judge_ok += 1
+                    else:
+                        self.judge_failed += 1
+            except Exception:  # noqa: BLE001
+                with self._lock:
+                    self.judge_failed += 1
+                logger.debug("在线裁判执行失败", exc_info=True)
+            finally:
+                self._jq.task_done()
 
     def _sampled(self) -> bool:
         """按采样率决定这一条是否记录。
@@ -286,7 +378,7 @@ class OnlineEvaluator:
 
     # --- 聚合读取 ---
 
-    def read_rows(self, limit: int = 2000) -> list[dict]:
+    def _read_rows_raw(self, limit: int = 2000) -> list[dict]:
         """读**最近** `limit` 条（含轮转备份）。
 
         ★ 为什么不能"全量读取再切片"（自查发现的浪费）
@@ -307,6 +399,47 @@ class OnlineEvaluator:
                 break
             rows = self._read_tail(p, limit - len(rows)) + rows
         return rows[-limit:]
+
+    def read_rows(self, limit: int = 2000) -> list[dict]:
+        """读最近 `limit` 条，并把**裁判分数合并进对应的基础行**。
+
+        ★ 为什么合并而不是让调用方自己 join
+        ---------------------------------
+        裁判是异步算的，落成独立记录（`{"kind": "judge", ...}`）。
+        若把 join 责任丢给每个调用方，聚合、前端、测试都得各写一遍，
+        且很容易漏掉 `kind` 过滤（把 judge 记录当成样本统计进去，
+        `sample_count` 直接翻倍）。
+        故在**唯一的读取出口**统一合并，并在这里过滤掉 judge 记录。
+
+        ★ 合并规则
+        -------
+        同一个 `sample_id` 若有多条 judge 记录（重试/重复判分），取**最后一条**；
+        `judge_error` 非空表示这次判分失败 → 不覆盖已有分数，只在行上留标记。
+        """
+        rows = self._read_rows_raw(limit)
+        judges: dict[str, dict] = {}
+        bases: list[dict] = []
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            if r.get("kind") == "judge":
+                sid = str(r.get("sample_id") or "")
+                if sid:
+                    judges[sid] = r
+                continue
+            bases.append(r)
+        if judges:
+            for r in bases:
+                j = judges.get(str(r.get("sample_id") or ""))
+                if not j:
+                    continue
+                if j.get("faithfulness") is not None:
+                    r["faithfulness"] = j.get("faithfulness")
+                    r["relevancy"] = j.get("relevancy")
+                    r["judge_model"] = j.get("judge_model")
+                elif j.get("judge_error"):
+                    r["judge_failed"] = True
+        return bases
 
     def _read_tail(self, path: Path, want: int) -> list[dict]:
         """从文件尾部反向读块，取得最后 `want` 条有效记录。
@@ -389,7 +522,9 @@ class OnlineEvaluator:
                 # 若只暴露 judge_rate 而不说明，用户会以为它已经工作，
                 # 进而怀疑"为什么 judge_sampled 一直是 0"。
                 # 故显式给出这个标志，让"未实现"是**可观测**的。
-                "judge_implemented": False,
+                "judge_implemented": True,
+                "judge_ok": self.judge_ok,
+                "judge_dropped": self.judge_dropped,
                 "judge_rate": self.judge_rate(),
                 "path": str(self.path),
                 "queue_size": self._q.qsize(),

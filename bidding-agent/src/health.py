@@ -222,6 +222,16 @@ def _component(name: str, kind: str, required: bool, result: dict,
         "ok": bool(result.get("ok")),
         "ms": result.get("ms", -1),
     }
+    # ★ 透传结构化数值字段（`probe_qdrant` 的 `count`）
+    #
+    # 为什么必须透传：`api/server.py` 的 `points_count` 兼容字段需要这个数字。
+    # 此前 `_component` 只拷 ok/ms/error，`count` 被丢掉，于是 server 只能
+    # 去**解析 detail 显示字符串**（`detail.split("=")[-1]`）——
+    # 而 detail 从 `points=565` 改成 `points≈565` 后解析就失败了，
+    # 导致 `/api/health` 返回 `points_count = -1`、前端显示「未连接向量库」。
+    # 结论：数值走结构化字段，绝不解析给人看的字符串。
+    if "count" in result:
+        item["count"] = result["count"]
     if not item["ok"] and result.get("error"):
         item["error"] = result["error"]
     if detail:

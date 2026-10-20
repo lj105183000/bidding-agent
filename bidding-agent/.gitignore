@@ -69,3 +69,16 @@ htmlcov/
 *.pre-*
 *.bak-*
 
+
+# ---- 运行时评测数据（不入库）----
+#
+# `online_samples.jsonl` 是**真实请求采到的样本**：每跑一次问答就可能追加行，
+# 属于运行时数据而不是源代码。入库的后果是"每次本地问答都产生一个 diff"，
+# 而且提交谁的本地样本都不合适（里面含真实请求的时长、工具调用等行为数据）。
+#
+# 需要可留存的评测基线请用 `eval/trend.jsonl` —— 那个是手动
+# `python -m eval.run_all --save` 产生的正式记录。
+#
+# 末尾的 `*` 覆盖轮转备份（`_rotate_if_needed` 会生成 `.1` 后缀）。
+eval/online_samples.jsonl
+eval/online_samples.jsonl.*

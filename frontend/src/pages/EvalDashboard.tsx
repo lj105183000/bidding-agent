@@ -217,6 +217,36 @@ export default function EvalDashboard() {
 
   useEffect(load, [])
 
+  // ★ 定时轮询 + 切回标签页时立即刷新
+  //
+  // 为什么必须加（实测反馈）：原先只在挂载时取一次，用户去「智能问答」提完问
+  // 再切回本页，看到的还是挂载那一刻的数据 —— 表现为「提了问题但看板不动」。
+  //
+  // 间隔 15 秒：在线评测是**采样**写入（默认 20%），再快也大概率没有新样本；
+  // 而 /api/eval/online 每次都要读 jsonl 尾部并聚合，太快会给后端添负担。
+  //
+  // 另监听 visibilitychange：从其他标签页切回来时立即刷一次，
+  // 免得「刚切回来还要等最多 15 秒」。
+  //
+  // 静默刷新：不置 loading、不清 err —— 否则按钮每 15 秒转一圈、错误提示闪烁。
+  useEffect(() => {
+    const silent = () => {
+      Promise.allSettled([fetchOfflineEval(), fetchOnlineEval()]).then(([o, n]) => {
+        if (o.status === 'fulfilled') setOffline(o.value)
+        if (n.status === 'fulfilled') setOnline(n.value)
+      })
+    }
+    const timer = window.setInterval(silent, 15000)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') silent()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [])
+
   // 按 suite 分组：指标多时平铺会看不出结构
   const grouped = new Map<string, OfflineMetric[]>()
   for (const m of offline?.metrics ?? []) {

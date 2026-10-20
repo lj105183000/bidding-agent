@@ -1068,10 +1068,24 @@ def health_check(
     qdrant = by_name.get("qdrant")
     points = -1
     if qdrant and qdrant.get("ok"):
-        try:
-            points = int(str(qdrant.get("detail", "")).split("=")[-1])
-        except (ValueError, IndexError):
-            points = -1
+        # ★ 优先读**结构化字段** `count`（`probe_qdrant` 直接给的数字）
+        #
+        # 此前的写法是解析 detail 显示字符串：
+        #     points = int(str(qdrant.get("detail", "")).split("=")[-1])
+        # 而 detail 后来改成了 `points≈565`（标注为近似值），没有 `=` 可切，
+        # 于是 int() 失败 → points = -1 → 前端显示「未连接向量库」。
+        # 教训：**显示字符串永远不该被当作数据源解析**。
+        raw = qdrant.get("count")
+        if isinstance(raw, int):
+            points = raw
+        else:
+            # 兼容旧 payload（component 里没带 count）：
+            # 只认纯数字 tail，`≈` 之类符号直接放弃而不是抛异常
+            tail = str(qdrant.get("detail", "")).split("=")[-1].strip("≈~ ")
+            try:
+                points = int(tail)
+            except (TypeError, ValueError):
+                points = -1
 
     payload["ready"] = payload["status"] in ("ok", "degraded", "warming")
     payload["agent_ready"] = bidding_agent is not None

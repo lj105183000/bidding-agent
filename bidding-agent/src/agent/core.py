@@ -864,12 +864,19 @@ class BiddingAgent(ReActMixin, GenerationMixin, ToolDefenseMixin):
             #
             # `maybe_record` 本身是纯提取 + 一次 `put_nowait`（写盘在后台线程），
             # 故这里不会增加可感知的延迟。
-            self._record_online_eval(meta, done, question, bool(history))
+            self._record_online_eval(
+                meta, done, question, bool(history),
+                # ★ 逐轮裁判要的答案与上下文（局限：在线样本本身不存文本，
+                #   故只能在这一次调用里顺路传进去，判分后即弃）
+                answer=meta.get("answer_text") or "",
+                sources=done.get("sources") or [],
+            )
             yield "done", done
 
     @staticmethod
     def _record_online_eval(meta: dict, done: dict, question: str,
-                            has_history: bool) -> None:
+                            has_history: bool, answer: str = "",
+                            sources: list | None = None) -> None:
         """把本轮请求交给在线评测器。**永不抛异常、永不阻塞**。
 
         抽成静态方法是为了让这个"绝不能出错"的调用点显式、可测。
@@ -878,7 +885,8 @@ class BiddingAgent(ReActMixin, GenerationMixin, ToolDefenseMixin):
             from src.eval_online import evaluator
 
             evaluator.maybe_record(
-                meta, done, question=question, has_history=has_history
+                meta, done, question=question, has_history=has_history,
+                answer=answer, sources=sources,
             )
         except Exception:  # noqa: BLE001 - 评测是旁路，绝不能影响请求
             logger.debug("在线评测接入失败（不影响请求）", exc_info=True)
