@@ -83,6 +83,13 @@ export interface OnlineEvalSnapshot {
   relevance_top1?: { mean: number; n: number } | null
   duration_ms?: { mean: number; p95: number; n: number } | null
   rag_steps_mean?: Record<string, number>
+  // ---- 逐轮 LLM 裁判（RAGAS 风格）----
+  // 只统计**被裁判过**的轮次：采样率 0.2 × 判分率 1.0，故数量远少于样本总数。
+  // 与 `relevance_top1`（余弦相似度，纯计算）口径不同，不可互相替代。
+  judge_count?: number
+  judge_failed_count?: number
+  faithfulness?: { mean: number; p95?: number; n: number } | null
+  relevancy?: { mean: number; p95?: number; n: number } | null
   agent_tool_calls?: { mean: number; n: number } | null
   agent_rounds?: { mean: number; n: number } | null
   agent_multi_round_rate?: number | null

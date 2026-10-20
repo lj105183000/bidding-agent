@@ -451,7 +451,45 @@ export default function EvalDashboard() {
             </div>
 
             <div className="flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-ink-500">
-              {online.agent_tool_calls && (
+              {/* ---------- 逐轮 LLM 裁判（RAGAS 风格）---------- */}
+            {/*
+              与上面那组比例指标的区别：
+                上面 `核对通过率 / 无来源比例 …` 是**纯计算**得出的（每轮都有）；
+                这里两条是**LLM 裁判**打分（只有被裁判的轮次才有）。
+              两者口径不同，故单独成块并注明样本数，避免被误读成"整体质量"。
+            */}
+            <div className="rounded-md border border-slate-200 bg-slate-50/60 px-3 py-2">
+              <div className="mb-1.5 flex items-center justify-between">
+                <span className="text-[11px] font-medium text-ink-600">
+                  逐轮 LLM 裁判（RAGAS 风格）
+                </span>
+                <span className="text-[10px] text-ink-400">
+                  {online.judge_count
+                    ? `已评 ${online.judge_count} 轮${online.judge_failed_count ? ` · 判分失败 ${online.judge_failed_count}` : ''}`
+                    : '暂无已评轮次'}
+                </span>
+              </div>
+              {online.judge_count ? (
+                <div className="grid grid-cols-1 gap-x-6 gap-y-1 sm:grid-cols-2">
+                  <RateRow
+                    label="忠实度 faithfulness"
+                    value={online.faithfulness?.mean ?? null}
+                    hint="回答中的事实性内容有多少能被检索材料支持（LLM 裁判，0~1）"
+                  />
+                  <RateRow
+                    label="相关性 relevancy"
+                    value={online.relevancy?.mean ?? null}
+                    hint="回答是否真正回应用户问题（LLM 裁判，0~1）"
+                  />
+                </div>
+              ) : (
+                <p className="text-[11px] text-ink-400">
+                  暂无 —— 在线采样率为 20%、判分率 100%，多提几个问题后这里会出现分数。
+                </p>
+              )}
+            </div>
+
+            {online.agent_tool_calls && (
                 <span>
                   平均工具调用{' '}
                   <b className="text-ink-700">{online.agent_tool_calls.mean.toFixed(2)}</b>

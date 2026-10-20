@@ -164,6 +164,15 @@ def summarize_rows(rows: list[dict]) -> dict[str, Any]:
     fb_up = sum(1 for v in fb if v > 0)
     fb_down = sum(1 for v in fb if v < 0)
 
+    # 逐轮 LLM 裁判分数。
+    #
+    # 只有**被裁判过的行**才有这两列（`read_rows()` 已把 judge 记录按
+    # sample_id 合并进基础行）。故绝对不能拿 `len(usable)` 当分母 ——
+    # 那会把"未评"算成 0 分，让指标看起来像"答得很差"。
+    faith_vals = _vals(usable, "faithfulness")
+    rel_vals = _vals(usable, "relevancy")
+    judge_failed = sum(1 for r in usable if r.get("judge_failed") is True)
+
     return {
         "sample_count": total,
         "evaluable_count": len(usable),
@@ -172,6 +181,20 @@ def summarize_rows(rows: list[dict]) -> dict[str, Any]:
             "已排除：首轮追问（无答案）与极短问题（寒暄/误触）。"
             "把它们算进指标会得出错误的结论。"
         ),
+
+        # ---- 逐轮 LLM 裁判（RAGAS 风格）----
+        #
+        # ★ 与下面「检索」那组的区别（别混）
+        # -----------------------------
+        # `relevance_*` 是**余弦相似度**（纯计算，每轮都有）；
+        # 这里是 **LLM 裁判**给的 0~1 分（只有被裁判过的轮次才有值；
+        # 默认采样率 0.2 × 判分率 1.0，故数量远少于样本总数）。
+        # 两者口径不同、不可互相替代：前者判"检索得准不准"，
+        # 后者判"答得对不对"。
+        "judge_count": len(faith_vals),
+        "judge_failed_count": judge_failed,
+        "faithfulness": _stat(faith_vals),
+        "relevancy": _stat(rel_vals),
 
         # ---- 检索 ----
         "relevance_top1": _stat(_vals(usable, "relevance_top1")),
