@@ -158,6 +158,12 @@ jobs:
           ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
           QDRANT_URL: ${{ secrets.QDRANT_URL }}
           QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          # agent 线构造 Settings 时会校验 Postgres 配置；不透传会让
+          # 配好 Secrets 后仍然报「缺少必需配置：POSTGRES_*」。
+          POSTGRES_HOST: ${{ secrets.POSTGRES_HOST }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           HF_HUB_OFFLINE: "1"
         run: |
           uv run python eval/run_all.py \
