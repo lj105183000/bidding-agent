@@ -44,8 +44,10 @@ jobs:
 
       # --frozen 只按 uv.lock 安装：保证 CI 与本地依赖完全一致，
       # 谁改了依赖但忘了提交 lock 文件会在这里失败，而不是悄悄装出不同环境
+      # --extra langfuse：测试会断言 SDK 可用性，不装可选依赖会让
+      # test_not_configured 等用例在 CI 上误红。
       - name: 同步依赖（按 uv.lock 锁定）
-        run: uv sync --frozen
+        run: uv sync --frozen --extra langfuse
 
       - name: 运行测试
         # ★ 加覆盖率与最慢用例，并显式排除 integration
@@ -64,8 +66,10 @@ jobs:
         #
         # `-m "not integration"` —— 本来已由 `addopts` 默认生效，这里**显式写出**
         #   是为了让 CI 日志里能直接看到这个口径，不必去翻 pyproject。
+        #
+        # `--extra langfuse` —— 与上面的 sync 保持一致，确保可选 SDK 在测试环境里。
         run: |
-          uv run pytest -q \
+          uv run --frozen --extra langfuse pytest -q \
             -m "not integration" \
             --durations=10 \
             --cov=src --cov=api \

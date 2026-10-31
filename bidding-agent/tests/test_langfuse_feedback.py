@@ -156,6 +156,7 @@ class TestSessionTraceMapping:
         ② 重启即丢：用户还没点赞就重启，那条反馈永远接不上
     """
 
+    @pytest.mark.integration
     def test_remember_and_lookup(self):
         from src.langfuse_feedback import lookup_trace_id, remember_session_trace
 
@@ -246,6 +247,7 @@ class TestDdlUsesFetchFalse:
 class TestTraceIdOnMessage:
     """`messages.trace_id` 的写入与查回。"""
 
+    @pytest.mark.integration
     def test_save_and_find(self):
         from src.database.postgresql_client import PostgresClient
 
@@ -259,6 +261,7 @@ class TestTraceIdOnMessage:
         assert mid >= 0
         assert pg.find_trace_id_by_message(mid) == "t-xyz"
 
+    @pytest.mark.integration
     def test_save_without_trace_id(self):
         """不带 trace_id 时照旧写入（trace_id 为 NULL）。"""
         from src.database.postgresql_client import PostgresClient

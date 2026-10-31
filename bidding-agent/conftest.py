@@ -37,6 +37,8 @@ except Exception:  # pragma: no cover - dotenv 不可用时退回纯占位
 os.environ.setdefault("QDRANT_URL", "http://localhost:6333")
 os.environ.setdefault("QDRANT_API_KEY", "test-key")
 os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
+# 裁判固定走智谱；CI 无 .env 时缺这个 key 会让 build_evaluator_llm() 直接抛
+os.environ.setdefault("ZHIPU_API_KEY", "test-key")
 os.environ.setdefault("LLM_PROVIDER", "deepseek")
 # 测试离线运行：嵌入/精排模型已本地缓存（HF_HOME），不依赖外网。
 # 未设此项时 huggingface_hub 会尝试联网刷新 token，无外网环境会长时间阻塞导致测试挂起。
