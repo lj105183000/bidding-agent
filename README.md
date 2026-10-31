@@ -117,7 +117,7 @@ uv run uvicorn api.server:app --host 0.0.0.0 --port 8001
 │   │   ├── log_redaction.py         # 日志出口脱敏（密钥 / JWT / 手机号 / 身份证 / 邮箱 / URL 参数）
 │   │   ├── api_access.py            # /api/logs、/api/metrics 访问控制
 │   │   └── langfuse_tracing.py      # 链路追踪（可选依赖）
-│   ├── tests/                       # pytest 3205 例（3198 passed / 3 skipped / 4 deselected）
+│   ├── tests/                       # pytest 全量（integration 默认排除；当前 3197 passed / 3 skipped / 10 deselected）
 │   ├── eval/                        # 分线评测：agent / retrieval / retrieval_offline / rag 四线
 │   ├── batch/                       # 数据处理脚本
 │   └── docs/                        # 开发文档 / 技术栈 / 组件工作机制
