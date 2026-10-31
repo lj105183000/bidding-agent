@@ -80,6 +80,12 @@ class MetricSpec:
     #: 标定工具（`eval/calibrate.py`）也会要求至少 5 次同条件观测才给建议值。
     #: 0 表示"未记录"（本项目大部分门槛是从若干次探针里取的，没有严格留痕）。
     calibrated_on_runs: int = 0
+    #: 是否参与「相对基线退化」判定。
+    #:
+    #: ★ token/成本这类指标天然抖动大，而门禁的容差是全局 2%（相对值）；
+    #: 把它们放进相对门禁会频繁误报。设 False 后仍会写入趋势文件、仍按绝对
+    #: 门槛判状态，只是不参与 `compare_with_previous` 的退化/进步归类。
+    track_regression: bool = True
 
     def judge(self, value: float | None) -> MetricStatus:
         """按方向与门槛判定状态。`value=None` 一律视为未测。"""
@@ -420,6 +426,113 @@ METRIC_SPECS: dict[str, MetricSpec] = {
             "1 题属**未匹配**（两路都没命中）。即调检索能解决约 60%，其余要动语料。"
         ),
     ),
+    # ---- 离线固定检索集（PR 门禁；不连云端、不调 LLM）----
+    "retrieval_offline.top1_relevant_rate": MetricSpec(
+        name="retrieval_offline.top1_relevant_rate",
+        label="离线首位切题率",
+        direction=Direction.HIGHER_IS_BETTER,
+        threshold=0.70,
+        unit="ratio",
+        suite="retrieval_offline",
+        calibrated_on_runs=1,
+        rationale=(
+            "离线固定集 40 题实测 0.7750（31/40）。门槛 0.70 = 允许再多 3 题"
+            "首条不切题。★ 只在一次实测上标定过，待同配置跑满 5 次后重标定。"
+        ),
+    ),
+    "retrieval_offline.recall_at_5": MetricSpec(
+        name="retrieval_offline.recall_at_5",
+        label="离线召回率@5",
+        direction=Direction.HIGHER_IS_BETTER,
+        threshold=0.13,
+        unit="ratio",
+        suite="retrieval_offline",
+        calibrated_on_runs=1,
+        rationale=(
+            "top-5 命中的相关文档占显式 qrels 的比例。**绝对值天然偏低**："
+            "qrels 由关键词初筛，宽主题有几十篇相关文档，top-5 最多只能覆盖 5 篇；"
+            "实测 0.1584。门槛 0.13 只用于拦截明显退化，不能按 1.0 的直觉解读。"
+        ),
+    ),
+    "retrieval_offline.precision_at_5": MetricSpec(
+        name="retrieval_offline.precision_at_5",
+        label="离线精确率@5",
+        direction=Direction.HIGHER_IS_BETTER,
+        threshold=0.45,
+        unit="ratio",
+        suite="retrieval_offline",
+        calibrated_on_runs=1,
+        rationale=(
+            "top-5 中相关文档的比例；实测 0.5250。门槛 0.45 允许前 5 条里"
+            "平均再多 0.4 条不相关。未跑满 5 次，属临时值。"
+        ),
+    ),
+    "retrieval_offline.mrr": MetricSpec(
+        name="retrieval_offline.mrr",
+        label="离线 MRR",
+        direction=Direction.HIGHER_IS_BETTER,
+        threshold=0.75,
+        unit="ratio",
+        suite="retrieval_offline",
+        calibrated_on_runs=1,
+        rationale=(
+            "首个相关文档位次的倒数均值；实测 0.8294。对排序变化最敏感，"
+            "是离线线的主指标。门槛 0.75 留出约 0.08 的余量。"
+        ),
+    ),
+    "retrieval_offline.no_relevant_in_top5_rate": MetricSpec(
+        name="retrieval_offline.no_relevant_in_top5_rate",
+        label="离线前5条全不切题比例",
+        direction=Direction.LOWER_IS_BETTER,
+        threshold=0.12,
+        unit="ratio",
+        suite="retrieval_offline",
+        calibrated_on_runs=1,
+        rationale=(
+            "召回彻底失手的比例。比排序更严重：库里明明有、用户却拿不到。"
+            "实测 0.0750（3/40），门槛 0.12 = 允许 4.8/40，留约 2 题余量。"
+        ),
+    ),
+    # ---- Agent token / 成本（只观测，不参与相对退化判定）----
+    "agent.tokens_per_case": MetricSpec(
+        name="agent.tokens_per_case",
+        label="平均 token 用量",
+        direction=Direction.LOWER_IS_BETTER,
+        threshold=None,
+        unit="token",
+        suite="agent",
+        rationale=(
+            "每题 prompt+completion token 均值。**只观测**：token 随问题长短与"
+            "工具轮次波动，不宜设固定门槛；用于发现「某次改动让调用量翻倍」。"
+        ),
+        track_regression=False,
+    ),
+    "agent.cost_usd_per_case": MetricSpec(
+        name="agent.cost_usd_per_case",
+        label="平均成本（美元/题）",
+        direction=Direction.LOWER_IS_BETTER,
+        threshold=None,
+        unit="USD",
+        suite="agent",
+        rationale=(
+            "按 llm_trace 逐次调用与模型单价估算。未定价模型/缺 usage 时记未测，"
+            "不把「不知道」记成 0。抖动大，不参与相对退化门禁。"
+        ),
+        track_regression=False,
+    ),
+    "agent.prompt_cache_hit_rate": MetricSpec(
+        name="agent.prompt_cache_hit_rate",
+        label="提示缓存命中率",
+        direction=Direction.HIGHER_IS_BETTER,
+        threshold=None,
+        unit="ratio",
+        suite="agent",
+        rationale=(
+            "prompt 缓存命中 token / prompt token。厂商不返回缓存字段时为未测。"
+            "抖动大，不参与相对退化门禁。"
+        ),
+        track_regression=False,
+    ),
     # ---- 观测指标（只记录不判定）----
     "agent.answer_chars_mean": MetricSpec(
         name="agent.answer_chars_mean",
@@ -555,12 +668,12 @@ class EvalReport:
     #: 关键配置快照——**没有它，两次分数不可比**
     config: dict = field(default_factory=dict)
     suites: list[SuiteReport] = field(default_factory=list)
-    #: 数据集登记与重叠核算（见 `eval/datasets.py`）。
+    #: 数据集登记与重叠核算（见 `eval/dataset_registry.py`）。
     #:
-    #: ★ 为什么结论旁边必须跟这一节：三条线用的是**三份不同**的数据
-    #: （Agent 18 题 / 检索 18 主题 / RAG 25 题，Agent 与 RAG 的交集只有 12 条），
-    #: 跨集分数**不可直接比**。不写出来，"RAG 0.79 比 Agent 1.00 差"这种
-    #: 错误解读一定会出现。
+    #: ★ 为什么结论旁边必须跟这一节：四条线用的是**四份不同**的数据
+    #: （Agent 40 题 / 检索 18 主题 / 离线检索 40 查询 / RAG 40 题，
+    #: Agent 与 RAG 的交集只有 25 条），跨集分数**不可直接比**。不写出来，
+    #: "RAG 0.79 比 Agent 1.00 差"这种错误解读一定会出现。
     datasets: dict = field(default_factory=dict)
 
     @property
@@ -612,6 +725,9 @@ def _fmt_value(value: float, spec: MetricSpec | None) -> str:
     """
     if spec is not None and spec.unit == "ratio":
         return f"{value:.4f}"
+    # 每题成本通常是 0.003 量级；两位小数会全部显示成 0.00，等于看不见变化。
+    if spec is not None and spec.unit == "USD":
+        return f"{value:.6f}"
     return f"{value:.2f}"
 
 

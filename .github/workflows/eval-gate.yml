@@ -58,6 +58,8 @@ jobs:
   #   否则 `uv sync` 在根目录找不到工程直接失败。
   # 先问运行器"有哪些线"，再据此生成 matrix —— 新增评测线时
   # 只需改 `eval/run_all.ALL_SUITES`，工作流不用动。
+  # 例外：retrieval_offline 由独立的 retrieval-offline-gate.yml 覆盖，
+  # 在下面的 list 步骤里显式过滤，避免重复下载 HF 模型。
   plan:
     name: 评测线清单
     runs-on: ubuntu-latest
@@ -75,8 +77,30 @@ jobs:
         run: uv sync --frozen
       - id: list
         name: 取评测线清单
+        env:
+          # 空 = 全部；逗号分隔可只跑子集。旧版声明了这个输入却没接进 matrix。
+          REQUESTED_SUITES: ${{ github.event.inputs.suites }}
         run: |
-          SUITES=$(uv run python eval/run_all.py --list-suites | python -c "import json,sys; print(json.dumps(json.load(sys.stdin)['suites']))")
+          SUITES=$(uv run python eval/run_all.py --list-suites | python -c "
+          import json, os, sys
+          suites = json.load(sys.stdin)['suites']
+          requested = [
+              s.strip() for s in os.environ.get('REQUESTED_SUITES', '').split(',')
+              if s.strip()
+          ]
+          unknown = [s for s in requested if s not in suites]
+          if unknown:
+              sys.exit(f'未知评测线：{unknown}（可选：{suites}）')
+          if requested:
+              suites = [s for s in suites if s in requested]
+          # retrieval_offline 由独立的 retrieval-offline-gate.yml 覆盖：
+          # 它不需要 Secrets，但要 HF 模型缓存；放在这里会让本工作流的
+          # 每条线都重复下载模型，且与 PR 门禁的触发条件不一致。
+          suites = [s for s in suites if s != 'retrieval_offline']
+          if not suites:
+              sys.exit('没有可跑的评测线（retrieval_offline 请用 retrieval-offline-gate.yml）')
+          print(json.dumps(suites))
+          ")
           echo "matrix={\"suite\":$SUITES}" >> "$GITHUB_OUTPUT"
           echo "评测线：$SUITES"
 
@@ -84,9 +108,15 @@ jobs:
     name: "eval / ${{ matrix.suite }}"
     needs: plan
     runs-on: ubuntu-latest
+    # RAG 线 40 题约 15–20 分钟；60 分钟足够，且能拦住挂死
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: bidding-agent
+    env:
+      # 固定缓存目录，便于 actions/cache 命中；与 retrieval-offline-gate 共用同一份
+      HF_HOME: ${{ github.workspace }}/.hf-cache
+      HF_ENDPOINT: https://hf-mirror.com
     # 每条线独立失败：一条挂了不影响其它线跑完（这正是"分线红"的意义）
     strategy:
       fail-fast: false
@@ -98,15 +128,28 @@ jobs:
           python-version: "3.12"
       - name: 同步依赖
         run: uv sync --frozen
-      # 趋势文件是基线来源，必须跨运行保留；否则每次都"没有基线可比"
-      - name: 恢复趋势文件
+      # ★ 趋势文件必须**按线隔离**缓存：三个 matrix job 并发时若共用同一个
+      #   key，actions/cache 只会保留最先保存的那份，其余线的基线被静默覆盖。
+      - name: 恢复趋势文件（按线）
         uses: actions/cache@v4
         with:
           path: bidding-agent/eval/trend.jsonl
-          key: eval-trend-${{ github.ref_name }}-${{ github.run_id }}
+          key: eval-trend-${{ github.ref_name }}-${{ matrix.suite }}-${{ github.run_id }}
           restore-keys: |
+            eval-trend-${{ github.ref_name }}-${{ matrix.suite }}-
             eval-trend-${{ github.ref_name }}-
-            eval-trend-
+      # ★ 模型必须先缓存/预热：门禁步骤设置了 HF_HUB_OFFLINE=1。
+      #   缓存未命中且不预热时，模型加载失败会变成 NOT_RUN —— 而 NOT_RUN
+      #   不参与 --fail-on 判定，工作流会"静默变绿"。
+      - name: 恢复 HF 模型缓存
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.hf-cache
+          key: hf-bge-small-zh-v1.5-v1
+          restore-keys: hf-bge-small-zh-v1.5-
+      - name: 预热嵌入模型（失败即红）
+        run: |
+          uv run python -c "from src.rag.embedder import Embedder; print(len(Embedder().encode_query('预热')))"
       - name: 跑 ${{ matrix.suite }} 线并门禁
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -121,6 +164,19 @@ jobs:
             --fail-on ${{ matrix.suite }} \
             --gate-json gate-${{ matrix.suite }}.json \
             ${{ (github.event.inputs.save == 'true') && '--save' || '' }}
+      # ★ NOT_RUN 的退出码是 0（"没测"不等于"没通过"），若只看退出码会漏掉
+      #   "模型/依赖挂了但工作流全绿"。这里显式校验该线确实跑过。
+      - name: 校验评测线确实执行
+        if: always()
+        run: |
+          uv run python -c "
+          import json, sys
+          suite = '${{ matrix.suite }}'
+          detail = json.load(open(f'gate-{suite}.json', encoding='utf-8'))
+          if suite not in detail.get('ran_suites', []):
+              sys.exit(f'{suite} 未执行（NOT_RUN），门禁结果无效')
+          print('评测线已执行：' + suite)
+          "
       - name: 上传门禁决策
         if: always()
         uses: actions/upload-artifact@v4

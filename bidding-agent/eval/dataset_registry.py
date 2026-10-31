@@ -6,7 +6,8 @@
        `test_questions.json` —— "cases" 与 "questions" 并不告诉你哪条线用哪个；
        而检索线**根本没有文件**（`retrieval_precision.TOPICS` 直接内联在 .py 里）。
        结果是"这次评测用的是哪套数据"要靠读代码才知道。
-    ② **两套集不是同一套**：实测 Agent 18 条、RAG 25 条，**交集只有 12 条**。
+    ② **几套集不是同一套**：实测 Agent 40 条、RAG 40 条，**交集只有 25 条**；
+       检索线另有 18 个内联主题、离线检索线 40 条查询。
        两套集里"独有题"的难度分布不同，所以**跨集的分数不可直接比**
        （"RAG 忠实度 0.79"与"Agent 准确率 1.00"是在不同题目上测出来的）。
        而报告里此前**没有任何提示**。
@@ -101,6 +102,17 @@ DATASETS: dict[str, DatasetInfo] = {
         description="每题带 reference，供 RAGAS 三项指标比对；不标期望工具",
         key_fields=("question", "reference"),
     ),
+    "retrieval_offline": DatasetInfo(
+        suite="retrieval_offline",
+        label="离线固定检索集",
+        source_kind="file",
+        path=EVAL_DIR / "fixtures" / "retrieval_offline.json",
+        description=(
+            "冻结的 corpus + query + qrels；内存重建索引，不读 data/、"
+            "不连云端 Qdrant、不调 LLM；用于 PR 自动门禁"
+        ),
+        key_fields=("query", "relevant_ids"),
+    ),
 }
 
 
@@ -137,6 +149,18 @@ def questions_of(suite: str) -> list[str]:
             if os.getenv("EVAL_DATASETS_DEBUG"):
                 traceback.print_exc()
             return []
+    if suite == "retrieval_offline":
+        # 对象型 fixture（corpus/queries），不是 JSON 数组，不能走 _load_json_list
+        try:
+            data = json.loads(info.path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return []
+        queries = data.get("queries") if isinstance(data, dict) else None
+        return [
+            str(item["query"]).strip()
+            for item in (queries or [])
+            if isinstance(item, dict) and str(item.get("query") or "").strip()
+        ]
     if info.path is None:
         return []
     out: list[str] = []
@@ -150,7 +174,7 @@ def questions_of(suite: str) -> list[str]:
 def references_of(suite: str) -> dict[str, str]:
     """题目 → reference（没有 reference 的题不入表）。"""
     info = DATASETS.get(suite)
-    if info is None or info.path is None or suite == "retrieval":
+    if info is None or info.path is None or suite in ("retrieval", "retrieval_offline"):
         return {}
     out: dict[str, str] = {}
     for case in _load_json_list(info.path):

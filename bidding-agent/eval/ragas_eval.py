@@ -69,6 +69,7 @@ import src.config  # noqa: F401  - 仅副作用：加载 .env（HF_ENDPOINT 等�
 
 import numpy as np
 from ragas import EvaluationDataset, evaluate
+from ragas import RunConfig as RagasRunConfig
 from ragas.embeddings import LangchainEmbeddingsWrapper
 from ragas.llms import LangchainLLMWrapper
 from ragas.metrics import AnswerRelevancy, Faithfulness, LLMContextRecall
@@ -299,8 +300,11 @@ def build_evaluator_llm():
         # ragas 只走异步路径，异步用的是 ChatOpenAI 独立的 http_async_client 字段：
         # 只配同步 http_client 的话真实链路会回落到 trust_env=True 的默认客户端，
         # 代理残留场景（WinError 10061）照样炸，两个都要钉死
-        http_client=httpx.Client(trust_env=False, timeout=60.0),
-        http_async_client=httpx.AsyncClient(trust_env=False, timeout=60.0),
+        # ★ 180s 而不是 60s：ragas 的 faithfulness 会为一篇回答并发多次
+        #   "抽陈述 + 逐条 NLI"，智谱在并发下经常 60s 内拿不到全部响应；
+        #   实测 60s 会让每个用例前两次尝试超时、第三次才成功（3 倍耗时）。
+        http_client=httpx.Client(trust_env=False, timeout=180.0),
+        http_async_client=httpx.AsyncClient(trust_env=False, timeout=180.0),
     )
 
 
@@ -398,6 +402,16 @@ def eval_one(case: dict, llm, embeddings, config: RunConfig) -> dict:
             metrics=_METRICS,
             llm=LangchainLLMWrapper(llm),
             embeddings=LangchainEmbeddingsWrapper(embeddings),
+            # ★ ragas 默认 max_workers=16 / timeout=180：智谱裁判在 16 路并发下
+            #   经常整组超时（实测每用例要重试 2 次才出分，单次约 3 分钟）。
+            #   降到 8 路并放宽到 300s：既能并行跑完 faithfulness 的多条 NLI，
+            #   又不至于把智谱打到限流/整组超时。
+            #   max_retries=1：ragas 内层 tenacity 默认重试 10 次、每次最多等 60s，
+            #   一次坏响应会把整个用例拖到 5 分钟以上；外层已有 3 次整体重试，
+            #   内层快速失败反而更快（失败样本不会把整轮拖死）。
+            run_config=RagasRunConfig(
+                timeout=300, max_workers=8, max_retries=1, max_wait=10
+            ),
         ))
         # 三项都拿到有限值 → 成功，不必再试
         #
@@ -674,13 +688,26 @@ def save_baseline(summary: dict, config: dict | RunConfig, n_cases: int) -> None
     print(f"\n基线已保存：{BASELINE_PATH}（锚定 {cfg.get('name')}）")
 
 
-def compare_baseline(summary: dict, tolerance: float, config: RunConfig) -> tuple[bool, list[str]]:
+def compare_baseline(
+    summary: dict,
+    tolerance: float,
+    config: RunConfig,
+    n_cases: int | None = None,
+) -> tuple[bool, list[str]]:
     """与基线比对。返回 (是否通过, 报告行)。
 
     `tolerance` 是**绝对差**容差（如 0.05 表示允许下降 5 个百分点）。
     为什么用绝对差而不是相对差：0.90→0.81 是相对降 10%，0.10→0.09 也是 10%，
     但后者毫无意义（低分区的波动本来就大）。绝对差配合"只看下降"更贴合
     "指标不能退化"这个诉求。
+
+    ★ `n_cases` 是**本次数据集规模**，不是有效判分数
+    --------------------------------------------------
+    `summary["n"]` 是有效判分题数（裁判失败的不算），它会随裁判抖动而变；
+    而 `baseline.json` 的 `cases` 存的是数据集规模（40）。若拿 35 去比 40，
+    一次正常的全量运行会被误判成"用例数不一致"，独立基线门禁永远不判。
+    传 `n_cases` 时用它做可比性判据；不传时保留旧行为（用 `summary["n"]`，
+    兼容只关心样本量的调用方与测试）。
     """
     if not BASELINE_PATH.exists():
         return False, [f"未找到基线文件 {BASELINE_PATH}；先跑一次 --save-baseline"]
@@ -739,9 +766,10 @@ def compare_baseline(summary: dict, tolerance: float, config: RunConfig) -> tupl
             f"提示词变体不一致：基线 {base_prompt}，本次 {cur_prompt}"
         )
     base_cases = base.get("cases")
-    if isinstance(base_cases, int) and summary.get("n") != base_cases:
+    cur_cases = n_cases if isinstance(n_cases, int) else summary.get("n")
+    if isinstance(base_cases, int) and cur_cases != base_cases:
         incomparable.append(
-            f"用例数不一致：基线 {base_cases} 题，本次 {summary.get('n')} 题"
+            f"用例数不一致：基线 {base_cases} 题，本次 {cur_cases} 题"
             "（--limit 的结果不能与全量基线比较）"
         )
 
@@ -1008,6 +1036,9 @@ def main() -> int:
                 primary["config"]["rerank"],
                 primary["config"].get("prompt_variant", ""),
             ),
+            # 用数据集规模而不是有效判分数：裁判失败会让 summary["n"] 抖动，
+            # 拿它比 cases 会把正常全量运行误判成"用例数不一致"
+            n_cases=len(cases),
         )
         for line in lines:
             print(line)

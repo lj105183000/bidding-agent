@@ -561,7 +561,7 @@ class TestRankingMetrics:
 
 
 # ===========================================================================
-# ⑥ 数据集：三份数据、重叠 12 条、不可跨集比
+# ⑥ 数据集：四份数据、Agent/RAG 重叠 25 条、不可跨集比
 # ===========================================================================
 
 
@@ -573,16 +573,17 @@ class TestDatasets:
         assert set(DS.DATASETS) == set(ALL_SUITES)
 
     def test_counts_and_overlap_are_as_measured(self):
-        """实测值：Agent 18 条、RAG 25 条、交集 12 条。"""
+        """实测值：Agent 40 条、RAG 40 条、交集 25 条（扩题后）。"""
         summary = DS.summary()
         entry = summary["datasets"]
-        assert entry["agent"]["cases"] == 18
-        assert entry["rag"]["cases"] == 25
+        assert entry["agent"]["cases"] == 40
+        assert entry["rag"]["cases"] == 40
         assert entry["retrieval"]["cases"] == 18
+        assert entry["retrieval_offline"]["cases"] == 40
         pair = next(p for p in summary["overlaps"] if p["pair"] == ["agent", "rag"])
-        assert pair["shared"] == 12
-        assert pair["only_a"] == 6
-        assert pair["only_b"] == 13
+        assert pair["shared"] == 25
+        assert pair["only_a"] == 15
+        assert pair["only_b"] == 15
 
     def test_shared_questions_have_identical_references(self):
         """交集里同题必须同参考答案 —— 否则横向比分数是拿两把尺子量同一根棍子。"""
@@ -601,6 +602,7 @@ class TestDatasets:
         assert "test_cases.json" in text
         assert "test_questions.json" in text
         assert "retrieval_precision.py" in text, "内联数据也要标出来源"
+        assert "retrieval_offline.json" in text
         assert "重叠" in text
 
     def test_fingerprint_stable_then_changes(self, tmp_path):
@@ -633,7 +635,7 @@ class TestDatasets:
         """结论旁边必须跟着"这是在什么数据上测的"。"""
         rep = _report([_suite("agent", [("agent.tool_accuracy", 0.95)])])
         rep.datasets = DS.summary()
-        assert rep.to_dict()["datasets"]["datasets"]["agent"]["cases"] == 18
+        assert rep.to_dict()["datasets"]["datasets"]["agent"]["cases"] == 40
         text = R.render_text(rep)
         assert "评测数据集" in text
         assert "不可直接横向比较" in text

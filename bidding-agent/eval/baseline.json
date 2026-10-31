@@ -1,28 +1,28 @@
 {
-  "saved_at": "2026-10-12 22:00:36",
+  "saved_at": "2026-10-30 23:59:03",
   "config": {
-    "name": "prompt-default",
+    "name": "top5",
     "top_k": 5,
     "rerank": false,
     "prompt_variant": "default"
   },
-  "cases": 25,
+  "cases": 40,
   "metrics": {
-    "faithfulness": 0.7705,
-    "relevancy": 0.8807,
+    "faithfulness": 0.8352,
+    "relevancy": 0.8654,
     "recall": 1.0
   },
   "detail": {
     "faithfulness": {
-      "mean": 0.7705,
-      "median": 0.875,
-      "min": 0.0,
-      "zeros": 1
+      "mean": 0.8352,
+      "median": 0.8947,
+      "min": 0.1667,
+      "zeros": 0
     },
     "relevancy": {
-      "mean": 0.8807,
-      "median": 0.8944,
-      "min": 0.6844,
+      "mean": 0.8654,
+      "median": 0.8906,
+      "min": 0.4189,
       "zeros": 0
     },
     "recall": {

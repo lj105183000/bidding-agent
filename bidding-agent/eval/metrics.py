@@ -102,15 +102,95 @@ class ProcessMetrics:
     #: 引用来源条数（本地 + 联网）
     source_count: int = 0
 
+    # --- LLM 用量与成本（来自 done 帧的 `llm_trace`）---
+    #
+    # ★ 全部允许 None：`llm_trace` 缺失、厂商不返回 usage、或模型不在价目表时，
+    #   "没测到"与"测出来是 0"必须区分。把 None 当 0 会让 token/成本指标
+    #   在系统最糟（完全没拿到用量）时反而最好看。
+    llm_calls: int | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    cache_hit_tokens: int | None = None
+    #: 估算成本（美元）。任一次调用无法定价/缺 usage → None（不记 0）。
+    cost_usd: float | None = None
+    #: 成功定价 / 无法定价的调用数，供 report note 说明成本是否完整。
+    priced_calls: int = 0
+    unpriced_calls: int = 0
+
     def to_dict(self) -> dict:
         return asdict(self)
 
 
-def extract_process_metrics(result: dict) -> ProcessMetrics:
+def _int_or_none(value) -> int | None:
+    """token 类字段只接受 int；bool 不是 token 数，None/其他一律视为未测。"""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _extract_usage(result: dict, m: ProcessMetrics, cost_fn) -> None:
+    """从 `llm_trace` 提取 token 与逐次调用成本。
+
+    成本必须**逐次调用**算：provider fallback 后同一次问答里可能混用不同模型，
+    用汇总 token × 单一模型单价会在切换时算错。
+    """
+    trace = result.get("llm_trace")
+    if not isinstance(trace, dict):
+        return
+
+    m.llm_calls = _int_or_none(trace.get("call_count"))
+    m.prompt_tokens = _int_or_none(trace.get("prompt_tokens"))
+    m.completion_tokens = _int_or_none(trace.get("completion_tokens"))
+    m.total_tokens = _int_or_none(trace.get("total_tokens"))
+    m.cache_hit_tokens = _int_or_none(trace.get("cache_hit_tokens"))
+
+    calls = trace.get("calls")
+    dropped = _int_or_none(trace.get("dropped_count")) or 0
+    if not isinstance(calls, list) or not calls:
+        # 没有任何逐次记录（例如 LLM 全失败）：成本无法计算
+        return
+
+    total = 0.0
+    priced = 0
+    unpriced = 0
+    for call in calls:
+        if not isinstance(call, dict):
+            unpriced += 1
+            continue
+        usage = {
+            "input": _int_or_none(call.get("prompt_tokens")),
+            "output": _int_or_none(call.get("completion_tokens")),
+            "input_cached_tokens": _int_or_none(call.get("cache_hit_tokens")),
+        }
+        cost = None
+        if cost_fn is not None:
+            try:
+                cost = cost_fn(str(call.get("model") or ""), usage)
+            except Exception:  # noqa: BLE001 - 定价失败不该让评测崩掉
+                cost = None
+        if isinstance(cost, dict) and isinstance(cost.get("total"), (int, float)):
+            total += float(cost["total"])
+            priced += 1
+        else:
+            unpriced += 1
+
+    m.priced_calls = priced
+    m.unpriced_calls = unpriced
+    # 截断（MAX_RECORDS=100）或任一调用无法定价 → 成本不完整，记 None。
+    # 宁可不报，也不报一个偏低的数。
+    if priced and unpriced == 0 and dropped == 0:
+        m.cost_usd = round(total, 8)
+
+
+def extract_process_metrics(result: dict, *, cost_fn=None) -> ProcessMetrics:
     """从 `chat()` 的返回里提取过程指标。**永不抛异常**。
 
     缺字段一律记 None / 0，并把"字段缺失"与"值为 0"区分开：
     例如 `verification_ok=None`（没跑核对）与 `False`（跑了且没过）含义完全不同。
+
+    `cost_fn` 默认为 `src.langfuse_tracing.estimate_cost`；测试可注入 fake，
+    避免依赖具体价目表。
     """
     m = ProcessMetrics()
     if not isinstance(result, dict):
@@ -183,6 +263,14 @@ def extract_process_metrics(result: dict) -> ProcessMetrics:
         if isinstance(val, list):
             m.source_count += len(val)
 
+    # --- LLM 用量与成本 ---
+    if cost_fn is None:
+        try:
+            from src.langfuse_tracing import estimate_cost as cost_fn
+        except Exception:  # noqa: BLE001 - 未安装/导入失败时只丢成本，不丢 token
+            cost_fn = None
+    _extract_usage(result, m, cost_fn)
+
     return m
 
 
@@ -199,6 +287,9 @@ def aggregate(metrics: list[ProcessMetrics]) -> dict:
             "verification_ok_rate": None,
             "verification_critical_ok_rate": None,
             "unsupported_law_cases": 0, "false_unavailable_cases": 0,
+            "usage_cases": 0, "cost_cases": 0, "tokens_per_case": None,
+            "cost_usd_per_case": None, "prompt_cache_hit_rate": None,
+            "unpriced_calls": 0,
         }
 
     total_calls = sum(m.tool_calls for m in metrics)
@@ -206,6 +297,16 @@ def aggregate(metrics: list[ProcessMetrics]) -> dict:
     verified = [m.verification_ok for m in metrics if m.verification_ok is not None]
     critical = [m.verification_critical_ok for m in metrics
                 if m.verification_critical_ok is not None]
+    # 用量/成本只在**真实拿到数据**的题上求均值；缺数据的题不参与，也不补 0。
+    usage = [m for m in metrics if m.total_tokens is not None]
+    costs = [m for m in metrics if m.cost_usd is not None]
+    hit_pairs = [
+        (m.cache_hit_tokens, m.prompt_tokens)
+        for m in metrics
+        if m.cache_hit_tokens is not None and m.prompt_tokens is not None
+    ]
+    hit_total = sum(hit for hit, _ in hit_pairs)
+    prompt_total = sum(prompt for _, prompt in hit_pairs)
     return {
         "cases": len(metrics),
         "tool_calls_mean": round(total_calls / len(metrics), 2),
@@ -237,6 +338,21 @@ def aggregate(metrics: list[ProcessMetrics]) -> dict:
         "source_count_mean": round(
             sum(m.source_count for m in metrics) / len(metrics), 2
         ),
+        # --- LLM 用量/成本 ---
+        "usage_cases": len(usage),
+        "cost_cases": len(costs),
+        "tokens_per_case": (
+            round(sum(m.total_tokens for m in usage) / len(usage), 1)
+            if usage else None
+        ),
+        "cost_usd_per_case": (
+            round(sum(m.cost_usd for m in costs) / len(costs), 8)
+            if costs else None
+        ),
+        "prompt_cache_hit_rate": (
+            round(hit_total / prompt_total, 4) if prompt_total else None
+        ),
+        "unpriced_calls": sum(m.unpriced_calls for m in metrics),
     }
 
 

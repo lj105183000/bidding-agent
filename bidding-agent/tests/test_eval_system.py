@@ -706,3 +706,82 @@ class TestGate:
         text = cmp.render()
         assert "样本量不一致" in text
         assert "不作为退化判据" in text
+
+
+# ===========================================================================
+# token / 成本指标
+# ===========================================================================
+
+
+def _trace(**overrides) -> dict:
+    trace = {
+        "call_count": 2,
+        "prompt_tokens": 1000,
+        "completion_tokens": 200,
+        "total_tokens": 1200,
+        "cache_hit_tokens": 400,
+        "dropped_count": 0,
+        "calls": [
+            {"model": "m", "prompt_tokens": 600, "completion_tokens": 100, "cache_hit_tokens": 300},
+            {"model": "m", "prompt_tokens": 400, "completion_tokens": 100, "cache_hit_tokens": 100},
+        ],
+    }
+    trace.update(overrides)
+    return trace
+
+
+class TestTokenCostMetrics:
+    def test_extracts_tokens_and_per_call_cost(self):
+        m = extract_process_metrics(
+            {"llm_trace": _trace()},
+            cost_fn=lambda model, usage: {"total": 0.001},
+        )
+        assert m.llm_calls == 2
+        assert m.total_tokens == 1200
+        assert m.cache_hit_tokens == 400
+        assert m.cost_usd == 0.002
+        assert m.priced_calls == 2 and m.unpriced_calls == 0
+
+    def test_missing_trace_is_none_not_zero(self):
+        m = extract_process_metrics({})
+        assert m.total_tokens is None
+        assert m.cost_usd is None
+        assert m.llm_calls is None
+
+    def test_unpriced_call_makes_cost_none_but_keeps_tokens(self):
+        """未知模型：成本算不出来，但 token 仍然有效。"""
+        m = extract_process_metrics(
+            {"llm_trace": _trace()},
+            cost_fn=lambda model, usage: None,
+        )
+        assert m.total_tokens == 1200
+        assert m.cost_usd is None
+        assert m.unpriced_calls == 2
+
+    def test_dropped_calls_make_cost_incomplete(self):
+        m = extract_process_metrics(
+            {"llm_trace": _trace(dropped_count=1)},
+            cost_fn=lambda model, usage: {"total": 0.001},
+        )
+        assert m.cost_usd is None, "记录被截断时不能报一个偏低的成本"
+        assert m.priced_calls == 2
+
+    def test_aggregate_skips_missing_usage(self):
+        with_usage = extract_process_metrics(
+            {"llm_trace": _trace()},
+            cost_fn=lambda model, usage: {"total": 0.001},
+        )
+        without = extract_process_metrics({})
+        agg = aggregate([with_usage, without])
+        assert agg["usage_cases"] == 1
+        assert agg["cost_cases"] == 1
+        assert agg["tokens_per_case"] == 1200
+        assert agg["cost_usd_per_case"] == 0.002
+        assert agg["prompt_cache_hit_rate"] == 0.4
+        assert agg["unpriced_calls"] == 0
+
+    def test_aggregate_all_missing_is_none_not_zero(self):
+        agg = aggregate([extract_process_metrics({}), extract_process_metrics({})])
+        assert agg["tokens_per_case"] is None
+        assert agg["cost_usd_per_case"] is None
+        assert agg["prompt_cache_hit_rate"] is None

@@ -476,6 +476,12 @@ DEFAULT_PRICE_TABLE: dict[str, dict[str, float]] = {
     # DeepSeek 官方价（2025 年前后）。cached_input 是缓存命中价（约 1/4）。
     "deepseek-chat": {"input": 0.27, "output": 1.10, "cached_input": 0.07},
     "deepseek-reasoner": {"input": 0.55, "output": 2.19, "cached_input": 0.14},
+    # ★ 项目默认模型。官方按时段浮动（2026-10 价目：
+    #   https://api-docs.deepseek.com/quick_start/pricing/），
+    #   峰值 input 0.30 / output 1.20 / 缓存命中 0.006，空闲时段为一半。
+    #   单值表只能存一组数，故取**峰值**——宁可高估也不低估成本；
+    #   只在空闲时段跑评测时，可用 LANGFUSE_PRICE_TABLE 覆盖成半价。
+    "deepseek-flash": {"input": 0.30, "output": 1.20, "cached_input": 0.006},
     # 本地 Ollama：没有 API 费用（电费与显卡不算），显式记 0 比"缺数据"更准确
     "qwen2.5:7b": {"input": 0.0, "output": 0.0},
     # 智谱（glm-4.7-flashx / glm-5.3-flashx）：flashx 系列按低价档估

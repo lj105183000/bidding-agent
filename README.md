@@ -25,7 +25,7 @@
 | 数据 | Neo4j 知识图谱 · PostgreSQL 会话与反馈 · Qdrant 向量库 |
 | 联网 | Tavily API · Exa MCP（自研 stdio JSON-RPC 客户端） |
 | 前端 | React 18 · TypeScript · Vite 5 · Tailwind CSS · Recharts · React Router |
-| 测试 | pytest（3165 例，其中 4 项默认排除）· Vitest |
+| 测试 | pytest（3205 例，其中 3 skipped / 4 默认排除）· Vitest |
 
 ## 快速开始
 
@@ -81,8 +81,10 @@ uv run uvicorn api.server:app --host 0.0.0.0 --port 8001
 | `python main.py dev` | 后台起后端 + 打印前端启动提示 |
 | `uv run pytest -q` | 全量后端测试（在 `bidding-agent/` 下执行） |
 | `npm run dev` / `npm run build` | 前端开发 / 构建（在 `frontend/` 下执行） |
+| `python eval/run_all.py --suites agent --gate --fail-on agent` | 统一评测（四线）与回归门禁 |
 | `python eval/ragas_eval.py` | RAG 质量评测（LLM-as-Judge） |
-| `python eval/agent_eval.py` | Agent 工具选择准确率 + 延迟 |
+| `python eval/agent_eval.py` | Agent 工具选择准确率 + 延迟 + token/成本 |
+| `python eval/load_eval.py --mode ask --concurrency 1,5,20 --requests 50` | HTTP 并发压测（ask 冒烟 / chat 正式） |
 
 ## 仓库结构
 
@@ -115,8 +117,8 @@ uv run uvicorn api.server:app --host 0.0.0.0 --port 8001
 │   │   ├── log_redaction.py         # 日志出口脱敏（密钥 / JWT / 手机号 / 身份证 / 邮箱 / URL 参数）
 │   │   ├── api_access.py            # /api/logs、/api/metrics 访问控制
 │   │   └── langfuse_tracing.py      # 链路追踪（可选依赖）
-│   ├── tests/                       # pytest 3165 例（3158 passed / 3 skipped / 4 deselected）
-│   ├── eval/                        # 分线评测：agent / retrieval / rag 三线共 20 项指标
+│   ├── tests/                       # pytest 3205 例（3198 passed / 3 skipped / 4 deselected）
+│   ├── eval/                        # 分线评测：agent / retrieval / retrieval_offline / rag 四线
 │   ├── batch/                       # 数据处理脚本
 │   └── docs/                        # 开发文档 / 技术栈 / 组件工作机制
 ├── docs/superpowers/                # 设计与实施记录（plans / specs）

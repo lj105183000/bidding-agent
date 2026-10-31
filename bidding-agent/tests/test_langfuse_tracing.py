@@ -664,6 +664,25 @@ class TestCostEstimation:
         assert cost["output"] == pytest.approx(1.10, abs=1e-6)
         assert cost["total"] == pytest.approx(1.37, abs=1e-6)
 
+    def test_deepseek_flash_builtin_peak_price(self):
+        """项目默认模型必须可定价，否则 agent.cost_usd_per_case 永远是「未测」。
+
+        内置表取官方峰值价（空闲时段为一半）；这里锁住数值，改价时必须同步测试。
+        """
+        cost = lt.estimate_cost(
+            "deepseek-flash", {"input": 1_000_000, "output": 1_000_000}
+        )
+        assert cost is not None
+        assert cost["input"] == pytest.approx(0.30, abs=1e-6)
+        assert cost["output"] == pytest.approx(1.20, abs=1e-6)
+        assert cost["total"] == pytest.approx(1.50, abs=1e-6)
+
+        cached = lt.estimate_cost(
+            "deepseek-flash",
+            {"input": 1_000_000, "output": 0, "input_cached_tokens": 1_000_000},
+        )
+        assert cached["total"] == pytest.approx(0.006, abs=1e-6)
+
     def test_cache_hit_is_cheaper(self):
         """★ 缓存命中要按折扣价算：DeepSeek 的 input 是**含**命中的总量。"""
         no_cache = lt.estimate_cost("deepseek-chat", {"input": 1_000_000, "output": 0})

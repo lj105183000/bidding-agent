@@ -71,15 +71,26 @@ def _disable_online_eval_writes():
     这是与 Langfuse 同一类的风险：一个"默认开启的旁路功能 + 测试会走到的
     代码路径" = 测试静默污染生产数据。故在**测试层**强制关掉。
 
-    注意：`tests/test_eval_online.py` 自己会覆盖这两个变量来测试写盘逻辑，
+    注意：`tests/test_eval_online.py` 自己会覆盖这些变量来测试写盘逻辑，
     且它用的是**临时目录**，故不受影响。
+
+    ★ 同时关掉裁判采样：本地 `.env` 可能配了
+    `RAG_ONLINE_EVAL_JUDGE_RATE=1.0`，而 `src.config` 在导入时会把
+    `.env` 灌进 `os.environ`（override=False）。不关的话，任何显式打开
+    在线评测的测试都会触发**真实裁判 LLM 调用**。
     """
     saved = {
         k: os.environ.get(k)
-        for k in ("RAG_ONLINE_EVAL", "RAG_ONLINE_EVAL_RATE", "RAG_ONLINE_EVAL_PATH")
+        for k in (
+            "RAG_ONLINE_EVAL",
+            "RAG_ONLINE_EVAL_RATE",
+            "RAG_ONLINE_EVAL_PATH",
+            "RAG_ONLINE_EVAL_JUDGE_RATE",
+        )
     }
     os.environ["RAG_ONLINE_EVAL"] = "0"
     os.environ["RAG_ONLINE_EVAL_RATE"] = "0"
+    os.environ["RAG_ONLINE_EVAL_JUDGE_RATE"] = "0"
     # 即便某些测试显式打开，也把数据引到临时目录，**绝不碰真实文件**
     tmp_dir = tempfile.mkdtemp(prefix="dsh-online-eval-")
     os.environ["RAG_ONLINE_EVAL_PATH"] = os.path.join(tmp_dir, "samples.jsonl")

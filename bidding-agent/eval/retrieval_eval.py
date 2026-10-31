@@ -171,12 +171,19 @@ def build_queries(entries: list[dict], style: str) -> list[str]:
     return queries
 
 
-def build_local_index(entries: list[dict]) -> tuple[VectorStore, BM25Encoder]:
+def build_local_index(
+    entries: list[dict], *, embedder_impl=None
+) -> tuple[VectorStore, BM25Encoder]:
     """用同一批数据在内存里重建索引：向量、分词、RRF 与线上完全同源，
-    只是省掉了网络往返。"""
+    只是省掉了网络往返。
+
+    `embedder_impl` 只为测试/离线线注入：默认仍用模块级单例，
+    不影响 `--use-cloud` 与现有调用方。
+    """
+    emb = embedder_impl if embedder_impl is not None else embedder
     questions = [e["question"] for e in entries]
     bm25 = BM25Encoder().fit(questions)
-    dense_vectors = embedder.encode_documents(questions)
+    dense_vectors = emb.encode_documents(questions)
     sparse_vectors = bm25.encode_documents(questions)
 
     store = VectorStore(
@@ -221,15 +228,22 @@ class Retriever:
     可能因索引/网络抖动而不同，对比就失去意义。
     """
 
-    def __init__(self, entries: list[dict], use_cloud: bool = False) -> None:
+    def __init__(
+        self, entries: list[dict], use_cloud: bool = False, *, embedder_impl=None
+    ) -> None:
         self.entries = entries
-        self.store, self.bm25 = build_cloud_index(entries) if use_cloud else build_local_index(entries)
+        self.embedder_impl = embedder_impl if embedder_impl is not None else embedder
+        self.store, self.bm25 = (
+            build_cloud_index(entries)
+            if use_cloud
+            else build_local_index(entries, embedder_impl=self.embedder_impl)
+        )
         self._cache: dict[tuple[str, str], list[dict]] = {}
 
     def candidates(self, style: str, query: str) -> list[dict]:
         key = (style, query)
         if key not in self._cache:
-            dense = embedder.encode_query(query)
+            dense = self.embedder_impl.encode_query(query)
             sparse = self.bm25.encode_query(query)
             self._cache[key] = self.store.hybrid_search(
                 dense, sparse, limit=CANDIDATE_K, prefetch_limit=PREFETCH_LIMIT
