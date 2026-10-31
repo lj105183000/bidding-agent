@@ -174,6 +174,10 @@ jobs:
           ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
           QDRANT_URL: ${{ secrets.QDRANT_URL }}
           QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+          # 图谱工具需要 Neo4j；缺配置会走降级文案，agent 指标会明显失真。
+          NEO4J_URI: ${{ secrets.NEO4J_URI }}
+          NEO4J_USERNAME: ${{ secrets.NEO4J_USERNAME }}
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
           # agent 线构造 Settings 时会校验 Postgres 配置。
           # 用本 job 的 service 容器，避免依赖 runner 无法访问的 localhost/内网库。
           POSTGRES_HOST: localhost
