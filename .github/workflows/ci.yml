@@ -33,6 +33,8 @@ jobs:
       - name: 安装 uv 与 Python 3.12
         uses: astral-sh/setup-uv@v5
         with:
+          # 与 uv.lock（revision 5）对齐：uv 版本漂移会让 lock --check 误判
+          version: "0.13.3"
           python-version: "3.12"
 
       # 软件包约束①：uv.lock 必须满足 pyproject.toml 声明的版本约束（如 openai <3.0.0 上界），
