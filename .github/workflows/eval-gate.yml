@@ -187,6 +187,8 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           HF_HUB_OFFLINE: "1"
+          # 核对失败时做一轮定向修复；agent 质量门禁需要它消除偶发的条款号/数字编造
+          AGENT_VERIFY_REPAIR: "1"
         run: |
           uv run python eval/run_all.py \
             --suites ${{ matrix.suite }} \
