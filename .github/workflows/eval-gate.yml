@@ -125,8 +125,9 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-    # RAG 线 40 题约 15–20 分钟；60 分钟足够，且能拦住挂死
-    timeout-minutes: 60
+    # RAG 线判分模型慢，实测完整 40 题约 2–3 小时；240 分钟给足余量。
+    # agent/retrieval 线仍会很快结束；超时只影响慢线。
+    timeout-minutes: 240
     defaults:
       run:
         working-directory: bidding-agent
