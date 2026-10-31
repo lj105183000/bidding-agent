@@ -32,9 +32,11 @@ uv.toml
 !.env.example
 
 # ---------- 数据 ----------
-data/
-!data/.gitkeep
-data/vocab.json
+# 只忽略后端数据目录；不要用裸 `data/`，否则会误伤 frontend/src/data/
+# （曾导致 graph.ts / graph.test.ts 从未入库，CI 干净检出直接 TS2307）
+/bidding-agent/data/
+!/bidding-agent/data/.gitkeep
+/bidding-agent/data/vocab.json
 
 # ---------- IDE / 系统 ----------
 .vscode/*
