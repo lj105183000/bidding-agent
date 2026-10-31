@@ -109,6 +109,22 @@ jobs:
     name: "eval / ${{ matrix.suite }}"
     needs: plan
     runs-on: ubuntu-latest
+    # agent 线需要 Postgres；用 job 内 service 容器，runner 内通过 localhost:5432 访问。
+    # 不复用仓库 Secrets 里的本地/内网库（GitHub 托管 runner 不可达）。
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: chatbot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     # RAG 线 40 题约 15–20 分钟；60 分钟足够，且能拦住挂死
     timeout-minutes: 60
     defaults:
@@ -158,12 +174,12 @@ jobs:
           ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
           QDRANT_URL: ${{ secrets.QDRANT_URL }}
           QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
-          # agent 线构造 Settings 时会校验 Postgres 配置；不透传会让
-          # 配好 Secrets 后仍然报「缺少必需配置：POSTGRES_*」。
-          POSTGRES_HOST: ${{ secrets.POSTGRES_HOST }}
-          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
-          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          # agent 线构造 Settings 时会校验 Postgres 配置。
+          # 用本 job 的 service 容器，避免依赖 runner 无法访问的 localhost/内网库。
+          POSTGRES_HOST: localhost
+          POSTGRES_DB: chatbot
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
           HF_HUB_OFFLINE: "1"
         run: |
           uv run python eval/run_all.py \
