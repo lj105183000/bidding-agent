@@ -247,6 +247,7 @@ class TestSummary:
         assert summarize([]) is None
 
 
+@pytest.mark.integration
 class TestPipelineIntegration:
     """真实 pipeline 的接入：`search()` 产出的计时能被读到。"""
 
