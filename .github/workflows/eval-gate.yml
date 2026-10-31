@@ -125,8 +125,9 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-    # RAG 线 40 题约 15–20 分钟；60 分钟足够，且能拦住挂死
-    timeout-minutes: 60
+    # RAG 线判分模型慢，实测完整 40 题约 2–3 小时；240 分钟给足余量。
+    # agent/retrieval 线仍会很快结束；超时只影响慢线。
+    timeout-minutes: 240
     defaults:
       run:
         working-directory: bidding-agent
@@ -174,6 +175,10 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          # 生成默认 provider 是 openai；CI 没有 OPENAI_API_KEY，不指定会让
+          # RAG 生成降级为知识库原文（实测答案相关性 0.76 < 0.85）。
+          LLM_PROVIDER: deepseek
+          DEEPSEEK_MODEL: deepseek-flash
           QDRANT_URL: ${{ secrets.QDRANT_URL }}
           QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
           # 实际集合名是 bid_qa；不传会回落到默认的 bidding_qa（不存在）
