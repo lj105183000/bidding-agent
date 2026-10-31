@@ -202,6 +202,9 @@ METRIC_SPECS: dict[str, MetricSpec] = {
         threshold=60000.0,
         unit="ms",
         suite="agent",
+        # 延迟受网络/模型负载影响，单次抖动可达 10%+；已有 60s 绝对门槛，
+        # 相对退化判定只会制造假红（实测 12095→13011ms 即报退化）。
+        track_regression=False,
         rationale=(
             "实测单源题 5~32 秒、复合题 7~30 秒；联网兜底时可达 40 秒。"
             "P95 定 60 秒是「用户还能等」的上限。超过说明打转或联网超时未收敛。"

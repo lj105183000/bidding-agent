@@ -627,29 +627,42 @@ class TestGate:
         assert cmp.regressions[0].name == "agent.tool_accuracy"
 
     def test_detects_regression_lower_is_better(self):
-        """★ 延迟**升高**才是退化。方向搞反会把变慢判成进步。"""
+        """★ 工具调用次数**升高**才是退化。方向搞反会把变差判成进步。"""
         suite = R.SuiteReport(suite="agent", ran=True, case_count=10)
-        suite.results = [R.make_result("agent.latency_p95", 90000.0)]
+        suite.results = [R.make_result("agent.tool_calls_mean", 3.0)]
         cur = R.EvalReport(schema_version=R.SCHEMA_VERSION, run_id="now", suites=[suite])
 
         base_suite = R.SuiteReport(suite="agent", ran=True, case_count=10)
-        base_suite.results = [R.make_result("agent.latency_p95", 30000.0)]
+        base_suite.results = [R.make_result("agent.tool_calls_mean", 1.0)]
         base = R.EvalReport(schema_version=R.SCHEMA_VERSION, run_id="base",
                             version="v1", suites=[base_suite])
         cmp = T.compare_with_previous(cur, [T.report_to_record(base)])
-        assert cmp.regressed, "延迟从 30s 涨到 90s 必须判退化"
+        assert cmp.regressed, "工具调用次数从 1 涨到 3 必须判退化"
 
-    def test_latency_decrease_is_improvement(self):
+    def test_lower_is_better_decrease_is_improvement(self):
         suite = R.SuiteReport(suite="agent", ran=True, case_count=10)
-        suite.results = [R.make_result("agent.latency_p95", 10000.0)]
+        suite.results = [R.make_result("agent.tool_calls_mean", 1.0)]
         cur = R.EvalReport(schema_version=R.SCHEMA_VERSION, run_id="now", suites=[suite])
         base_suite = R.SuiteReport(suite="agent", ran=True, case_count=10)
-        base_suite.results = [R.make_result("agent.latency_p95", 30000.0)]
+        base_suite.results = [R.make_result("agent.tool_calls_mean", 2.0)]
         base = R.EvalReport(schema_version=R.SCHEMA_VERSION, run_id="base",
                             version="v1", suites=[base_suite])
         cmp = T.compare_with_previous(cur, [T.report_to_record(base)])
         assert cmp.improvements
         assert not cmp.regressed
+
+    def test_latency_is_not_tracked_for_relative_regression(self):
+        """延迟有 60s 绝对门槛；网络/负载造成的相对抖动不该判退化。"""
+        suite = R.SuiteReport(suite="agent", ran=True, case_count=10)
+        suite.results = [R.make_result("agent.latency_p95", 90000.0)]
+        cur = R.EvalReport(schema_version=R.SCHEMA_VERSION, run_id="now", suites=[suite])
+        base_suite = R.SuiteReport(suite="agent", ran=True, case_count=10)
+        base_suite.results = [R.make_result("agent.latency_p95", 30000.0)]
+        base = R.EvalReport(schema_version=R.SCHEMA_VERSION, run_id="base",
+                            version="v1", suites=[base_suite])
+        cmp = T.compare_with_previous(cur, [T.report_to_record(base)])
+        assert not cmp.regressed
+        assert not cmp.regressions
 
     def test_tolerance_suppresses_noise(self):
         """★ 容差必须留：LLM 有随机性，±2% 波动不该报退化。
