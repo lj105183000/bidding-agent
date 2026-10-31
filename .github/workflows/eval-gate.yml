@@ -149,7 +149,9 @@ jobs:
       # ★ 趋势文件必须**按线隔离**缓存：三个 matrix job 并发时若共用同一个
       #   key，actions/cache 只会保留最先保存的那份，其余线的基线被静默覆盖。
       - name: 恢复趋势文件（按线）
-        uses: actions/cache@v4
+        # 用 cache/restore 而不是 cache：避免在成功时自动保存，
+        # 下面用显式 cache/save 保证**门禁失败时也保存**新基线。
+        uses: actions/cache/restore@v4
         with:
           path: bidding-agent/eval/trend.jsonl
           key: eval-trend-${{ github.ref_name }}-${{ matrix.suite }}-${{ github.run_id }}
@@ -187,11 +189,17 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           HF_HUB_OFFLINE: "1"
+          # 核对失败时做一轮定向修复；agent 质量门禁需要它消除偶发的条款号/数字编造
+          AGENT_VERIFY_REPAIR: "1"
+          # agent 线 37 题，单题翻转 ≈2.7%，实测 2 题波动 5.4%；放宽到 10%，
+          # 由绝对门槛（工具≥0.9 / critical≥0.95 / ok≥0.9）兜底。其它线保持 2%。
+          GATE_TOLERANCE: ${{ matrix.suite == 'agent' && '0.10' || '0.02' }}
         run: |
           uv run python eval/run_all.py \
             --suites ${{ matrix.suite }} \
             --gate \
             --fail-on ${{ matrix.suite }} \
+            --tolerance $GATE_TOLERANCE \
             --gate-json gate-${{ matrix.suite }}.json \
             ${{ (github.event.inputs.save == 'true') && '--save' || '' }}
       # ★ NOT_RUN 的退出码是 0（"没测"不等于"没通过"），若只看退出码会漏掉
@@ -214,3 +222,12 @@ jobs:
           name: gate-${{ matrix.suite }}
           path: bidding-agent/gate-${{ matrix.suite }}.json
           if-no-files-found: warn
+      # ★ 关键：`--save` 写的新基线必须在门禁失败时也保存。
+      #   否则第一次 `save=true` 因相对旧基线的退化而 exit 2，cache 后置步骤
+      #   不落盘 → 下一次仍拿旧基线比较，基线永远无法更新。
+      - name: 保存趋势文件（失败也保存）
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: bidding-agent/eval/trend.jsonl
+          key: eval-trend-${{ github.ref_name }}-${{ matrix.suite }}-${{ github.run_id }}
