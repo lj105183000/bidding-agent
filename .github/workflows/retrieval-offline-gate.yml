@@ -1,0 +1,136 @@
+# 离线检索门禁：PR 上跑 `retrieval_offline` 线，不连 Qdrant、不调 LLM。
+#
+# ★ 为什么单独一个 workflow
+# ======================
+# `ci.yml` 是纯单测（无模型、几十秒）；把模型下载与评测塞进去会让每个 PR
+# 变慢且更易抖动。`eval-gate.yml` 手动触发、需要真实 Qdrant/LLM Secrets，
+# 不适合每个 PR。本工作流只跑确定性的内存索引，无 Secrets 也能在 fork PR 跑。
+#
+# ★ 依赖
+# ======
+#   · 冻结数据：bidding-agent/eval/fixtures/retrieval_offline.json
+#   · 基线：bidding-agent/eval/trend.jsonl 里一条 suites=["retrieval_offline"]
+#     的记录（本地 `--save` 后提交）
+#   · 模型：BAAI/bge-small-zh-v1.5（HF 缓存；首次可走镜像）
+#
+# ★ 防“没测也算过”
+# ==============
+# 运行后校验 gate JSON 的 `ran_suites` 含 retrieval_offline；fixture 缺失、
+# 模型加载失败等都会让该线 NOT_RUN，而 NOT_RUN **不会**让退出码非零。
+# 故必须显式断言它真的跑了。
+
+name: Retrieval Offline Gate
+
+on:
+  pull_request:
+    paths:
+      - "bidding-agent/eval/**"
+      - "bidding-agent/src/rag/**"
+      - "bidding-agent/scripts/build_offline_fixture.py"
+      - "bidding-agent/pyproject.toml"
+      - "bidding-agent/uv.lock"
+      - ".github/workflows/retrieval-offline-gate.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: retrieval-offline-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: 离线检索门禁
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: bidding-agent
+    env:
+      # 固定缓存目录，便于 actions/cache 命中；不污染 runner 的其他缓存
+      HF_HOME: ${{ github.workspace }}/.hf-cache
+      HF_ENDPOINT: https://hf-mirror.com
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 uv 与 Python 3.12
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.13.3"
+          python-version: "3.12"
+
+      - name: 同步依赖
+        run: uv sync --frozen
+
+      - name: 恢复 HF 模型缓存
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.hf-cache
+          key: hf-bge-small-zh-v1.5-v1
+          restore-keys: hf-bge-small-zh-v1.5-
+
+      - name: 校验 fixture 与基线
+        run: |
+          uv run python -c "
+          from eval.retrieval_offline_eval import load_fixture
+          from eval.dataset_registry import DATASETS, fingerprint
+          from eval.trend import load_history
+
+          fixture = load_fixture()
+          assert len(fixture.queries) == 40, f'queries={len(fixture.queries)}'
+
+          sha = fingerprint(DATASETS['retrieval_offline'].path)['sha256_12']
+          baselines = [
+              r for r in load_history()
+              if r.get('suites') == ['retrieval_offline']
+          ]
+          assert baselines, (
+              '缺少 retrieval_offline 基线：本地跑 '
+              'python eval/run_all.py --suites retrieval_offline --save 后提交 eval/trend.jsonl'
+          )
+          baseline_sha = (baselines[-1].get('config') or {}).get(
+              'RETRIEVAL_OFFLINE_FIXTURE_SHA'
+          )
+          assert baseline_sha == sha, (
+              f'fixture 已变化（基线 {baseline_sha} → 当前 {sha}）：'
+              '必须重建基线后再提交'
+          )
+          "
+
+      - name: 预热嵌入模型（失败即红）
+        run: |
+          uv run python -c "from src.rag.embedder import Embedder; print(len(Embedder().encode_query('预热')))"
+
+      - name: 离线检索门禁
+        env:
+          # 预热之后禁止联网：缓存未命中会直接失败，而不是悄悄下载新版本
+          HF_HUB_OFFLINE: "1"
+        run: |
+          uv run python eval/run_all.py \
+            --suites retrieval_offline \
+            --gate \
+            --fail-on retrieval_offline \
+            --gate-json gate-retrieval_offline.json
+
+      - name: 校验该线真的跑了（NOT_RUN 不得视为通过）
+        if: always()
+        run: |
+          uv run python -c "
+          import json
+          detail = json.load(open('gate-retrieval_offline.json', encoding='utf-8'))
+          assert 'retrieval_offline' in detail['ran_suites'], (
+              'retrieval_offline 未实际运行（NOT_RUN），门禁不得视为通过'
+          )
+          "
+
+      - name: 上传门禁决策
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-retrieval_offline
+          path: bidding-agent/gate-retrieval_offline.json
+          if-no-files-found: warn

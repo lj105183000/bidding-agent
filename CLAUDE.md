@@ -10,7 +10,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - 文档里的文件路径、函数名、端点**不代表可以在磁盘上读到**；改代码前先 `ls` 确认，不要假设。
 - 前端 Chat 全链路（SSE 流式、provider 切换、联网/深度思考开关、会话持久化与列表、点赞/点踩、停止）已接通后端；Dashboard/extract/price/material/analysis 四页仍为 mock。
-- **CI 是绿的**：`uv run pytest -q`（584 例）全绿；前端 `npm run build`（tsc 无错）+ `vitest run` 通过。
+- **CI 是绿的**：`uv run pytest -q`（3198 passed）全绿；前端 `npm run build`（tsc 无错）+ `vitest run` 通过。
+- 评测已扩为四线（agent / retrieval / retrieval_offline / rag），统一入口 `python eval/run_all.py`；另有独立 HTTP 压测 `eval/load_eval.py`。离线检索线接 PR 门禁 `.github/workflows/retrieval-offline-gate.yml`。
 - 你的任务如果是"实现某模块"，文档已经把契约、验收标准和文件清单写好了——照做即可，不要另起炉灶。
 
 ## 仓库布局
@@ -45,7 +46,7 @@ python main.py dev                       # 后台起后端 + 打印前端启动�
 
 cd frontend && npm install && npm run dev # 前端 http://localhost:5173（Vite）
 
-uv run pytest -q                          # 全量测试（目标 131 例）
+uv run pytest -q                          # 全量测试（3198 passed）
 uv run pytest tests/test_react_loop.py -v # 单文件
 uv run pytest -k "sse" -v                 # 关键词筛选
 

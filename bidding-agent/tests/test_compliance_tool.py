@@ -94,6 +94,7 @@ class TestExecutor:
         text, _ = CT.check_tender_compliance({"text": SAMPLE})
         assert "疑似" in text
 
+    @pytest.mark.integration
     def test_returns_sources_with_text(self):
         """★ 来源卡片必须带正文。
 

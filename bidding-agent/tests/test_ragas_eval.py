@@ -41,7 +41,10 @@ def _patch_env(monkeypatch, sources=None, evaluate_result=None, error=None):
 
     calls = []
 
-    def fake_evaluate(dataset, metrics, llm, embeddings):
+    def fake_evaluate(dataset, metrics, llm, embeddings, **kwargs):
+        # ★ 必须显式传 run_config：默认 16 路并发 + 180s 会让智谱裁判整组超时，
+        #   这里锁住"调用方确实传了自定义并发/超时配置"。
+        assert kwargs.get("run_config") is not None
         calls.append(dataset)
         # 键名镜像 ragas 0.4.3 的真实返回：LLMContextRecall().name == "context_recall"，
         # 而非类名暗示的 "llm_context_recall"——fake 越贴近现实，键名回归越藏不住

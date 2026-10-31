@@ -390,7 +390,11 @@ def decide_exit_code(
         raise ValueError("--fail-on 与 --allow-fail 不能同时使用（口径会自相矛盾）")
     known = set(ran) | set(comparison.suite_verdicts if comparison else {}) | set(all_suites([]))
     for name, values in (("--fail-on", fail_on), ("--allow-fail", allow_fail)):
-        unknown = [v for v in (values or []) if v not in known and v not in {"agent", "retrieval", "rag"}]
+        unknown = [
+            v for v in (values or [])
+            if v not in known
+            and v not in {"agent", "retrieval", "retrieval_offline", "rag"}
+        ]
         if unknown:
             raise ValueError(f"{name} 里有未知的评测线：{unknown}")
 
@@ -595,6 +599,12 @@ def compare_with_previous(
             prev_f = float(prev_value)
             cur_f = float(result.value)
         except (TypeError, ValueError):
+            continue
+
+        # 只记录、不参与相对退化判定（如 token/成本，抖动远大于 2% 容差）。
+        # 放在 new/missing 判定之后：它们仍会作为"新指标/本次未测"出现，
+        # 只是不会被归入退化或进步。
+        if spec is not None and not spec.track_regression:
             continue
 
         delta = cur_f - prev_f

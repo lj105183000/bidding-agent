@@ -103,6 +103,11 @@ class OnlineEvaluator:
         self._explicit_path = path
         self._q: queue.Queue = queue.Queue(maxsize=QUEUE_MAXSIZE)
         self._lock = threading.Lock()
+        #: 写文件专用锁：基础行线程与裁判线程都会 `_append`。
+        #: 不加锁时两者会并发 `mkdir` / `open` / 轮转 —— 实测在 Windows 上
+        #: 基础行会因目录创建竞争而整条丢失（`write_errors` 静默 +1）。
+        #: 与 `_lock` 分开：`_lock` 只保护计数器，不该被文件 IO 拖住。
+        self._write_lock = threading.Lock()
         self._started = False
         self._stop = threading.Event()
         self._worker: threading.Thread | None = None
@@ -216,7 +221,7 @@ class OnlineEvaluator:
 
     def _maybe_judge(self, sample_id: str, question: str, answer: str,
                      sources: list | None) -> None:
-        """按 `RAGAS_ONLINE_EVAL_JUDGE_RATE` 决定这一轮是否送裁判。**永不抛异常**。
+        """按 `RAG_ONLINE_EVAL_JUDGE_RATE` 决定这一轮是否送裁判。**永不抛异常**。
 
         文本只进队列，由裁判线程用完即弃；磁盘只落分数。
         """
@@ -369,10 +374,13 @@ class OnlineEvaluator:
             logger.debug("在线评测轮转失败", exc_info=True)
 
     def _append(self, row: dict) -> None:
-        self._rotate_if_needed()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        # 串行化整段"轮转 → 建目录 → 追加"，否则基础行线程与裁判线程会竞争
+        # （实测：并发 mkdir 时基础行可能整条丢失，而请求方毫无感知）。
+        with self._write_lock:
+            self._rotate_if_needed()
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
         with self._lock:
             self.written += 1
 
@@ -515,13 +523,10 @@ class OnlineEvaluator:
             return {
                 "enabled": self.enabled(),
                 "rate": self.rate(),
-                # ★ 如实标注"LLM 裁判采样尚未实现"
-                #
-                # RAG_ONLINE_EVAL_JUDGE_RATE 能被读取并出现在快照里，
-                # 但 maybe_record **没有**任何调用裁判的代码 —— 设了不生效。
-                # 若只暴露 judge_rate 而不说明，用户会以为它已经工作，
-                # 进而怀疑"为什么 judge_sampled 一直是 0"。
-                # 故显式给出这个标志，让"未实现"是**可观测**的。
+                # ★ 裁判是**异步旁路**：基础行先落盘，裁判线程再追加一条
+                # 只含分数的 `kind=judge` 记录，读取时按 sample_id 合并回基础行。
+                # `judge_sampled/ok/failed/dropped` 都是运行期计数——采样率为 0
+                # 时它们保持 0 是**配置结果**，不是"未实现"。
                 "judge_implemented": True,
                 "judge_ok": self.judge_ok,
                 "judge_dropped": self.judge_dropped,
@@ -533,7 +538,6 @@ class OnlineEvaluator:
                 "dropped": self.dropped,
                 "written": self.written,
                 "write_errors": self.write_errors,
-                # 恒为 0，因为裁判未实现（见 judge_implemented）
                 "judge_sampled": self.judge_sampled,
                 "judge_failed": self.judge_failed,
             }

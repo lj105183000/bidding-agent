@@ -247,6 +247,7 @@ class TestSummary:
         assert summarize([]) is None
 
 
+@pytest.mark.integration
 class TestPipelineIntegration:
     """真实 pipeline 的接入：`search()` 产出的计时能被读到。"""
 
@@ -371,6 +372,7 @@ class TestFallbackPathTiming:
     而"降级"恰恰是最需要看检索性能的时候（用户会问"这次为什么这么慢"）。
     """
 
+    @pytest.mark.integration
     def test_fallback_records_rag_timing(self, monkeypatch):
         """用"主路径必失败"的假客户端逼出降级路径。"""
         from src.agent import BiddingAgent

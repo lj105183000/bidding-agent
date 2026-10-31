@@ -57,7 +57,7 @@ EVAL_DIR = Path(__file__).resolve().parent
 AGENT_CASES = EVAL_DIR / "test_cases.json"
 
 #: 各条线的名字。用于 --suites 过滤与报告分组。
-ALL_SUITES = ("agent", "retrieval", "rag")
+ALL_SUITES = ("agent", "retrieval", "retrieval_offline", "rag")
 
 
 def _git_version() -> str:
@@ -113,6 +113,18 @@ def _runtime_config() -> dict:
         cfg["MAX_TOOL_ROUNDS"] = MAX_TOOL_ROUNDS
         cfg["DEFAULT_TOP_K"] = getattr(rag_const, "DEFAULT_TOP_K", "")
         cfg["MIN_RELEVANCE"] = getattr(rag_const, "MIN_RELEVANCE", "")
+        cfg["EMBED_MODEL_NAME"] = getattr(rag_const, "EMBED_MODEL_NAME", "")
+    except Exception:
+        pass
+    # 离线检索线的分数依赖冻结数据本身；把 fixture 内容哈希写进 config，
+    # CI 才能确认"这次跑的题"与基线是同一份（改题不重建基线会被拦下）。
+    try:
+        from eval.dataset_registry import DATASETS, fingerprint
+
+        info = DATASETS.get("retrieval_offline")
+        sha = fingerprint(info.path if info else None)["sha256_12"]
+        if sha:
+            cfg["RETRIEVAL_OFFLINE_FIXTURE_SHA"] = sha
     except Exception:
         pass
     return {k: v for k, v in cfg.items() if v not in ("", None)}
@@ -295,6 +307,26 @@ def run_agent_suite(limit: int = 0, web_mode: str = "off") -> SuiteReport:
         note=f"编造工具不可用 {agg['false_unavailable_cases']} 题",
     ))
     suite.results.append(make_result("agent.answer_chars_mean", agg["answer_chars_mean"]))
+    # token/成本只观测、不参与相对退化门禁（见 report.MetricSpec.track_regression）。
+    # 未拿到 usage 的题不计入均值；note 必须说清有效题数，避免把"没测"读成"很低"。
+    suite.results.append(make_result(
+        "agent.tokens_per_case",
+        agg["tokens_per_case"],
+        note=f"{agg['usage_cases']}/{n} 题有 token 数据",
+    ))
+    suite.results.append(make_result(
+        "agent.cost_usd_per_case",
+        agg["cost_usd_per_case"],
+        note=(
+            f"{agg['cost_cases']}/{n} 题可完整定价；"
+            f"{agg['unpriced_calls']} 次调用无法定价"
+        ),
+    ))
+    suite.results.append(make_result(
+        "agent.prompt_cache_hit_rate",
+        agg["prompt_cache_hit_rate"],
+        note="缓存命中 token / prompt token；厂商不返回缓存字段时为未测",
+    ))
     return suite
 
 
@@ -569,10 +601,21 @@ def run_retrieval_suite(limit: int = 0) -> SuiteReport:
 # ===========================================================================
 
 
+def run_retrieval_offline_suite(limit: int = 0) -> SuiteReport:
+    """离线固定检索线：不连 Qdrant、不调 LLM，可在 PR 的干净 CI 里跑。
+
+    薄包装 + 延迟导入：`--list-suites` / 只跑 agent 线时不应加载
+    qdrant_client 与嵌入模型。
+    """
+    from eval.retrieval_offline_eval import run_offline_suite
+
+    return run_offline_suite(limit=limit)
+
+
 def run_rag_suite(limit: int = 0) -> SuiteReport:
     """RAG 线：RAGAS 三项指标。
 
-    RAGAS 依赖重、耗时长（25 题约 10 分钟），且需要 LLM。跑不了时记 NOT_RUN。
+    RAGAS 依赖重、耗时长（40 题约 15–20 分钟），且需要 LLM。跑不了时记 NOT_RUN。
     """
     suite = SuiteReport(suite="rag")
     try:
@@ -600,6 +643,7 @@ def run_rag_suite(limit: int = 0) -> SuiteReport:
             build_evaluator_llm,
             judge_provider_matches_generator,
             load_cases,
+            save_baseline,
         )
     except Exception as exc:
         suite.note = f"导入 ragas_eval 失败：{type(exc).__name__}: {exc}"
@@ -629,7 +673,7 @@ def run_rag_suite(limit: int = 0) -> SuiteReport:
     # ★ `case_count` 用**数据集规模**（本线跑了多少题），不是"有效判分题数"
     # --------------------------------------------------------------
     # `summary["n"]` 是**有效**例数（判分失败的不算），而它随裁判抖动而变：
-    # 同一套 25 题，实测一次 21 题有效（4 题判分失败）、下一次可能是 23 题。
+    # 同一套 40 题，实测一次可能 36 题有效（4 题判分失败）、下一次可能是 38 题。
     #
     # 而 `case_count` 是**可比性判据**（`compare_with_previous` 用它判断
     # "两次是不是同一批样本"）—— 用有效数会让裁判抖一次就触发
@@ -692,6 +736,18 @@ def run_rag_suite(limit: int = 0) -> SuiteReport:
         else:
             note = "未能从 summary 里取到该指标"
         suite.results.append(make_result(metric_name, value, note=note))
+
+    # ★ 可选：顺手刷新独立 RAGAS 基线（eval/baseline.json）。
+    #   热路径（ragas_eval.py --save-baseline）要再跑一遍同样的 40 题，裁判慢时
+    #   要多花 1.5–2.5 小时；这里的 `run["summary"]` 与那边完全同源，可直接存。
+    #   必须显式开启，避免一次普通评测悄悄改掉别人正在用的基线文件。
+    if os.getenv("RAGAS_SAVE_BASELINE", "").strip().lower() in {"1", "true", "yes"}:
+        try:
+            save_baseline(summary, run.get("config") or {}, len(cases))
+        except Exception as exc:  # noqa: BLE001 - 基线存档失败不该让评测结果作废
+            suite.note = (
+                f"{suite.note}｜刷新 baseline.json 失败：{type(exc).__name__}: {exc}"
+            )
     return suite
 
 
@@ -727,7 +783,7 @@ def build_report(
         #   否则"3 次中位"会被当成基线去比"1 次实测"。
         report.config["REPEAT"] = repeat
     # ★ 数据集登记与重叠核算（`eval/dataset_registry.py`）：结论必须带着
-    #   "这是在什么数据上测的"一起出现 —— 三条线用的是三份不同的数据，
+    #   "这是在什么数据上测的"一起出现 —— 四条线用的是四份不同的数据，
     #   跨集分数不可直接比。取不到时留空 dict（报告里就不打这一节）。
     try:
         from eval.dataset_registry import summary as _datasets_summary
@@ -740,22 +796,29 @@ def build_report(
     runners: list[tuple[str, str, object]] = []
     if "agent" in suites:
         runners.append((
-            "agent", "[1/3] 跑 Agent 线…",
+            "agent", "跑 Agent 线…",
             lambda: run_agent_suite(limit=limit, web_mode=web_mode),
         ))
     if "retrieval" in suites:
         runners.append((
-            "retrieval", "[2/3] 跑 检索线…",
+            "retrieval", "跑 检索线…",
             lambda: run_retrieval_suite(limit=limit),
+        ))
+    if "retrieval_offline" in suites:
+        runners.append((
+            "retrieval_offline", "跑 离线检索线…",
+            lambda: run_retrieval_offline_suite(limit=limit),
         ))
     if "rag" in suites:
         runners.append((
-            "rag", "[3/3] 跑 RAG 线…",
+            "rag", "跑 RAG 线…",
             lambda: run_rag_suite(limit=limit),
         ))
 
-    for name, banner, run in runners:
-        print(banner)
+    # 分母按实际选中线数动态算：新增 suite 后忘了改 `[x/3]` 会打印出
+    # "3 条线里的第 4 条"这种自相矛盾的进度。
+    for idx, (name, banner, run) in enumerate(runners, start=1):
+        print(f"[{idx}/{len(runners)}] {banner}")
         if repeat <= 1:
             report.suites.append(run())  # type: ignore[operator]
             continue
@@ -834,7 +897,7 @@ def parse_suite_list(raw: str, flag: str) -> list[str]:
 def main() -> int:
     setup_stdio()
     parser = argparse.ArgumentParser(description="统一 Agent 评估体系")
-    parser.add_argument("--suites", default="agent,retrieval,rag",
+    parser.add_argument("--suites", default=",".join(ALL_SUITES),
                         help="要跑的线，逗号分隔（默认全部）")
     parser.add_argument("--limit", type=int, default=0, help="每条线只用前 N 条用例")
     parser.add_argument(

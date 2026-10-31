@@ -199,6 +199,11 @@ def _isolate_env(monkeypatch, tmp_path):
     monkeypatch.setenv("RAG_ONLINE_EVAL", "1")
     monkeypatch.setenv("RAG_ONLINE_EVAL_RATE", "1")
     monkeypatch.setenv("RAG_ONLINE_EVAL_PATH", str(tmp_path / "s.jsonl"))
+    # ★ 必须显式关掉裁判：本地 .env 里可能配了 RAG_ONLINE_EVAL_JUDGE_RATE=1.0，
+    #   而 src.config 在导入时会把 .env 灌进 os.environ（override=False）。
+    #   不关的话每条基础记录会额外写一条 judge 行，`written == accepted` 之类的
+    #   旧不变量会被环境悄悄破坏。
+    monkeypatch.setenv("RAG_ONLINE_EVAL_JUDGE_RATE", "0")
     yield
 
 
@@ -262,7 +267,9 @@ class TestRecorder:
         self._drain(ev)
         rows = ev.read_rows()
         assert len(rows) == 5
-        assert ev.written == 5
+        # 裁判实现后，每条基础记录还会额外写一条 judge 行；`written` 统计所有行，
+        # 故不能再与采样条数精确相等。基础行数由上面的 `read_rows` 断言。
+        assert ev.written >= 5
 
     def test_read_tolerates_bad_lines(self, tmp_path):
         """坏行跳过而不是整体失败：jsonl 可能被人工编辑或写了一半。"""
@@ -315,8 +322,17 @@ class TestRecorder:
             t.join()
         self._drain(ev)
         assert ev.accepted == n_threads * per
-        # 允许极少数写失败，但不应静默丢
-        assert ev.written + ev.write_errors == ev.accepted
+        # `_drain` 的 `written >= accepted` 条件在裁判行也计数后会提前满足，
+        # 故这里等到基础记录真正全部落盘（最多 5 秒）再断言。
+        deadline = time.monotonic() + 5.0
+        rows: list[dict] = []
+        while time.monotonic() < deadline:
+            rows = ev.read_rows(limit=n_threads * per * 2)
+            if len(rows) >= ev.accepted:
+                break
+            time.sleep(0.02)
+        assert len(rows) == ev.accepted, "基础记录不能静默丢"
+        assert ev.written + ev.write_errors >= ev.accepted
 
 
 # ===========================================================================
@@ -528,21 +544,90 @@ class TestSamplingUnbiased:
         assert called == [], "未采样时不应调用 evaluate（白做功）"
 
 
-class TestJudgeNotImplemented:
-    """★ 配置项存在但功能未实现 —— 必须**可观测**地标注。
+class TestJudgeSnapshot:
+    """裁判已实现（逐轮 RAGAS 风格裁判）—— 快照必须如实声明。
 
-    `RAG_ONLINE_EVAL_JUDGE_RATE` 能被读取并出现在快照里，但 `maybe_record`
-    没有任何调用裁判的代码。若只暴露 `judge_rate` 而不说明，用户会以为它已工作，
-    进而怀疑"为什么 judge_sampled 一直是 0"。
+    历史上这里断言的是"未实现"；裁判落地后源码改为 True，
+    测试未同步会一直红。保留这组断言是为了防止快照把功能状态标错。
     """
 
-    def test_snapshot_declares_not_implemented(self, tmp_path):
+    def test_snapshot_declares_judge_implemented(self, tmp_path):
         snap = OnlineEvaluator(path=tmp_path / "s.jsonl").snapshot()
-        assert snap.get("judge_implemented") is False, (
-            "必须显式声明裁判未实现，否则 judge_rate 会被当成可用配置"
+        assert snap.get("judge_implemented") is True, (
+            "裁判已实现，快照不能继续标成未实现"
         )
         assert snap.get("judge_sampled") == 0
         assert snap.get("judge_failed") == 0
+
+
+class TestJudgePath:
+    """裁判**开启**路径：此前全模块强制 `JUDGE_RATE=0`，这条链路没有覆盖。
+
+    用 fake `judge_turn` 验证三件事：
+        ① 采样率 1.0 时确实入队并落一条 `kind=judge` 记录；
+        ② `read_rows()` 按 sample_id 把分数合并回基础行；
+        ③ 裁判行只存分数，不落 question/answer/sources（隐私边界）。
+    """
+
+    _Q = "投标保证金比例上限是多少？"
+    _A = "投标保证金不得超过招标项目估算价的百分之二。"
+
+    @staticmethod
+    def _fake_judge(monkeypatch, result: dict):
+        monkeypatch.setattr(
+            "src.eval_online.judge.judge_turn",
+            lambda **kwargs: result,
+        )
+
+    def test_judge_on_merges_scores_into_base_row(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("RAG_ONLINE_EVAL_JUDGE_RATE", "1")
+        self._fake_judge(monkeypatch, {
+            "ok": True, "faithfulness": 0.9, "relevancy": 0.8,
+            "judge_model": "fake-judge", "error": "",
+        })
+        path = tmp_path / "j.jsonl"
+        ev = OnlineEvaluator(path=path)
+        ev.maybe_record(
+            {}, _done(), question=self._Q, answer=self._A,
+            sources=[{"question": "保证金", "answer": "不超过 2%"}],
+        )
+        # 两个队列分别 join：基础行与裁判行都真正落盘后再读，避免 sleep 猜时间
+        ev._q.join()
+        ev._jq.join()
+
+        assert ev.judge_sampled == 1
+        assert ev.judge_ok == 1
+        assert ev.judge_failed == 0
+
+        rows = ev.read_rows()
+        assert len(rows) == 1
+        assert rows[0]["faithfulness"] == pytest.approx(0.9)
+        assert rows[0]["relevancy"] == pytest.approx(0.8)
+        assert rows[0]["judge_model"] == "fake-judge"
+
+        raw = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        judge_rows = [r for r in raw if r.get("kind") == "judge"]
+        assert len(judge_rows) == 1
+        for field in ("question", "answer", "sources"):
+            assert field not in judge_rows[0], f"裁判行不得落 {field}"
+
+    def test_judge_error_marks_base_row_without_scores(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("RAG_ONLINE_EVAL_JUDGE_RATE", "1")
+        self._fake_judge(monkeypatch, {
+            "ok": False, "faithfulness": None, "relevancy": None,
+            "judge_model": "fake-judge", "error": "boom",
+        })
+        ev = OnlineEvaluator(path=tmp_path / "j.jsonl")
+        ev.maybe_record({}, _done(), question=self._Q, answer=self._A)
+        ev._q.join()
+        ev._jq.join()
+
+        assert ev.judge_sampled == 1
+        assert ev.judge_failed == 1
+        rows = ev.read_rows()
+        assert len(rows) == 1
+        assert rows[0].get("judge_failed") is True
+        assert "faithfulness" not in rows[0]
 
 
 class TestTailReading:

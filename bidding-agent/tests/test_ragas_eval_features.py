@@ -137,13 +137,13 @@ def baseline_file(tmp_path, monkeypatch):
     path = tmp_path / "baseline.json"
     monkeypatch.setattr(R, "BASELINE_PATH", path)
 
-    def write(metrics: dict, top_k: int = 5, rerank: bool = False):
+    def write(metrics: dict, top_k: int = 5, rerank: bool = False, cases: int = 25):
         path.write_text(
             json.dumps(
                 {
                     "saved_at": "2026-01-01 00:00:00",
                     "config": {"name": "top5", "top_k": top_k, "rerank": rerank},
-                    "cases": 25,
+                    "cases": cases,
                     "metrics": metrics,
                     "detail": {},
                 },
@@ -242,6 +242,32 @@ def test_baseline_same_case_count_still_judged(baseline_file):
     passed, lines = R.compare_baseline(summary, 0.05, R._PRESETS["top5"])
     assert passed is False
     assert not any("用例数不一致" in line for line in lines)
+
+
+def test_baseline_case_count_uses_dataset_size_not_valid_count(baseline_file):
+    """★ 可比性判据用数据集规模，不是有效判分数。
+
+    40 题里 5 题裁判失败时 `summary["n"]=35`；若拿 35 去比基线 40，
+    一次正常全量运行会被误判成"用例数不一致"——独立基线门禁永远不判。
+    """
+    baseline_file({"faithfulness": 0.80, "relevancy": 0.88, "recall": 1.0}, cases=40)
+    summary = _summary(0.60, 0.88, 1.0, n=35)  # 5 题判分失败
+    passed, lines = R.compare_baseline(
+        summary, 0.05, R._PRESETS["top5"], n_cases=40
+    )
+    assert passed is False, "全量运行应正常判退化"
+    assert not any("用例数不一致" in line for line in lines)
+
+
+def test_baseline_limit_run_still_incomparable(baseline_file):
+    """`--limit 2` 仍必须判不可比——不能用数据集规模把保护绕过去。"""
+    baseline_file({"faithfulness": 0.80, "relevancy": 0.88, "recall": 1.0}, cases=40)
+    summary = _summary(0.99, 0.99, 1.0, n=2)
+    passed, lines = R.compare_baseline(
+        summary, 0.05, R._PRESETS["top5"], n_cases=2
+    )
+    assert passed is True
+    assert any("用例数不一致" in line for line in lines)
 
 
 def test_baseline_rerank_flag_mismatch_detected(baseline_file):
