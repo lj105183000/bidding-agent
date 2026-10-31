@@ -191,9 +191,9 @@ jobs:
           HF_HUB_OFFLINE: "1"
           # 核对失败时做一轮定向修复；agent 质量门禁需要它消除偶发的条款号/数字编造
           AGENT_VERIFY_REPAIR: "1"
-          # agent 线 37 题，单题翻转 ≈2.7%；2% 容差会把正常抖动误判为退化。
-          # agent 放宽到 5%，其它线保持 2%。
-          GATE_TOLERANCE: ${{ matrix.suite == 'agent' && '0.05' || '0.02' }}
+          # agent 线 37 题，单题翻转 ≈2.7%，实测 2 题波动 5.4%；放宽到 10%，
+          # 由绝对门槛（工具≥0.9 / critical≥0.95 / ok≥0.9）兜底。其它线保持 2%。
+          GATE_TOLERANCE: ${{ matrix.suite == 'agent' && '0.10' || '0.02' }}
         run: |
           uv run python eval/run_all.py \
             --suites ${{ matrix.suite }} \
