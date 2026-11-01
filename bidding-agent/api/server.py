@@ -173,6 +173,14 @@ except Exception:  # pragma: no cover - 模块未就绪
     web_fallback_service = None
     tender_schema = None
 
+# 数据中台（只读资产目录 / 血缘）。目录来自静态注册表，不连接数据库；
+# 单独 try：导入失败不该影响问答等主链路，只让 /api/data/* 返回 503。
+try:
+    from src.datahub import datahub as datahub_service
+except Exception:  # pragma: no cover - 模块未就绪
+    logger.exception("数据中台服务导入失败，/api/data/* 端点将返回 503")
+    datahub_service = None
+
 
 def _error_sse(content: str) -> str:
     """构造单条 error 帧（type 键口径，与 §6 协议一致）。"""
@@ -3112,6 +3120,86 @@ def web_coverage(request: WebSearchRequest) -> dict[str, Any]:
     _web_guard()
     cov = web_fallback_service.local_coverage(request.query)
     return cov.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# 数据中台：只读资产目录 / 血缘（P0）
+# ---------------------------------------------------------------------------
+#
+# 为什么放在静态托管之前：SPA 兜底路由匹配任意路径，之后注册的 /api/* 会被它截住。
+# 为什么失败也返回 Envelope 而不是 HTTPException：这三个端点主要给前端/排障脚本用，
+# 统一形状（success / asset / error）比 FastAPI 默认的 {"detail": ...} 更好解析。
+
+
+def _datahub_error(status_code: int, asset: str, message: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "success": False,
+            "asset": asset,
+            "error": message,
+            "elapsed_ms": 0,
+        },
+    )
+
+
+@app.get("/api/data/catalog")
+def data_catalog(kind: str | None = None, layer: str | None = None) -> Any:
+    """数据资产目录（只读；三库全挂也可用）。"""
+    if datahub_service is None:
+        return _datahub_error(503, "catalog", "数据中台服务未就绪")
+    try:
+        return datahub_service.catalog(kind=kind, layer=layer)
+    except ValueError as exc:
+        return _datahub_error(400, "catalog", str(exc))
+
+
+@app.get("/api/data/catalog/{asset}")
+def data_catalog_asset(asset: str) -> Any:
+    """单个资产详情；支持短名（bidding_records -> pg.bidding_records）。"""
+    if datahub_service is None:
+        return _datahub_error(503, asset, "数据中台服务未就绪")
+    try:
+        result = datahub_service.asset(asset)
+    except ValueError as exc:
+        return _datahub_error(400, asset, str(exc))
+    if result is None:
+        return _datahub_error(404, asset, f"未知数据资产：{asset}")
+    return result
+
+
+@app.get("/api/data/lineage")
+def data_lineage(
+    asset: str | None = None,
+    direction: str = "both",
+    depth: int = 2,
+) -> Any:
+    """静态数据血缘子图；不传 asset 返回全局图。"""
+    label = asset or "lineage"
+    if datahub_service is None:
+        return _datahub_error(503, label, "数据中台服务未就绪")
+    try:
+        result = datahub_service.lineage(asset=asset, direction=direction, depth=depth)
+    except ValueError as exc:
+        return _datahub_error(400, label, str(exc))
+    if result is None:
+        return _datahub_error(404, label, f"未知数据资产：{asset}")
+    return result
+
+
+@app.get("/api/data/quality/latest")
+def data_quality_latest() -> Any:
+    """最近一份数据质量报告；尚未生成时 503。"""
+    if datahub_service is None:
+        return _datahub_error(503, "quality", "数据中台服务未就绪")
+    try:
+        result = datahub_service.quality_latest()
+    except Exception:
+        logger.exception("质量报告查询失败")
+        return _datahub_error(500, "quality", "质量报告查询失败，请稍后重试")
+    if result is None:
+        return _datahub_error(503, "quality", "质量报告尚未生成，请先运行质量扫描")
+    return result
 
 
 # ---------------------------------------------------------------------------

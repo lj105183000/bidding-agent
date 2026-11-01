@@ -524,11 +524,14 @@ def test_dsn_strips_trailing_cr_from_password(monkeypatch):
 def test_dsn_has_no_hardcoded_password():
     """★ 密码只能来自 .env。
 
-    用两个都置空的变量构造：若代码里写死了密码兜底，这里会拿到非空值。
+    P1 起 DSN 组装收口到 `src.datahub.pg.dsn`，故源码检查目标也移到那里；
+    `C._dsn` 只是兼容包装，不再直接读 getenv。
     """
     import inspect
 
-    source = inspect.getsource(C._dsn)
+    from src.datahub import pg as pg_module
+
+    source = inspect.getsource(pg_module.dsn)
     assert "getenv" in source
     assert "Neo4j@2026Local" not in source and "545983" not in source
 
@@ -564,9 +567,15 @@ def test_graph_error_is_catchable_as_competitor_error():
 
 
 def test_no_psycopg_or_neo4j_exception_leaks_in_contract():
-    """对外承诺的异常只有这两个名字，不该有 psycopg/neo4j 的类型。"""
+    """对外承诺的异常只有这两个名字，不该有 psycopg/neo4j 的类型。
+
+    P1 起 `_dsn` / `_neo4j_driver` 会捕获 `DataHubConfigError` 并转成
+    业务异常；这个导入名以下划线开头，不属于公开契约，故扫描时跳过。
+    """
     pub = []
     for name in dir(C):
+        if name.startswith("_"):
+            continue
         obj = getattr(C, name)
         if isinstance(obj, type) and issubclass(obj, BaseException):
             pub.append(name)
@@ -903,6 +912,9 @@ def test_import_does_not_touch_databases():
     for line in module_source.splitlines():
         if line.startswith(("psycopg.connect", "GraphDatabase.driver")):
             pytest.fail(f"模块级出现了连接调用：{line}")
-    # _Cursor / _GraphSession 是延迟到 __enter__ 才连
-    assert "def __enter__" in inspect.getsource(C._Cursor)
+    # P1 起 _Cursor 是兼容包装（返回 datahub.pg.PGCursor）；真正的连接
+    # 仍延迟到 __enter__，不会在 import 时建立。_GraphSession 保持显式 __enter__。
+    from src.datahub.pg import PGCursor
+
+    assert "def __enter__" in inspect.getsource(PGCursor)
     assert "def __enter__" in inspect.getsource(C._GraphSession)
