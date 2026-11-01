@@ -43,6 +43,11 @@ uv sync                                  # 安装后端依赖（含 dev 组 pyte
 python main.py ingest                    # 知识库导入：Excel 问/答 → Qdrant（全量重建）
 python main.py api                       # 启动后端 http://localhost:8001（开发带 reload）
 python main.py dev                       # 后台起后端 + 打印前端启动提示
+python main.py pg --dry-run              # 预览 PostgreSQL 导入列计划（不连库）
+python main.py pg --force                # 确认 DROP 重建 bidding_records
+python -m src.datahub.quality            # 跑一次数据质量扫描（打印 JSON，不落库）
+python main.py scheduler --list          # 数据中台任务清单（不连后端）
+DATA_SCHEDULER_ENABLED=1 python main.py scheduler  # 常驻调度（独立进程）
 
 cd frontend && npm install && npm run dev # 前端 http://localhost:5173（Vite）
 
@@ -78,6 +83,8 @@ src/tools/          BaseTool + ToolRunner（4 线程并行 / 30s 超时 / 异常
                     rag_tools.py 定义工具 + TOOL_EXECUTORS 注册表
 src/clients/        LLM 客户端：deepseek / zhipu / openai_compatible / vision + llm_factory
 src/database/       Neo4j 知识图谱（6 类查询模板）/ PostgreSQL（6 类查询 + 会话/反馈 CRUD）
+src/datahub/        轻量数据中台 —— 资产目录 registry.py / 静态血缘 lineage.py /
+                    只读门面 service.py / 契约 contract.py（P0）；P1 起承载统一数据访问
 src/mcp/ + web_search.py   Exa MCP（自研 stdio JSON-RPC 客户端）+ Tavily
 src/config.py       Settings dataclass，__post_init__ 校验必需项，缺失直接退出
 ```
@@ -88,6 +95,8 @@ src/config.py       Settings dataclass，__post_init__ 校验必需项，缺失�
 - **工具永不抛异常**：数据库/图谱/联网工具统一返回 `{"success", "data"/"results", "error"}`，格式化器处理所有失败分支。Agent 绝不因后端宕机崩溃——这是硬性约定。
 - **异常分级**：完整异常（服务地址、原始错误、SQL）**只进日志**；用户可见提示不泄露内部细节。
 - **出站 `trust_env=False`**：所有出站 HTTP 不继承系统代理。这是为了规避"桌面代理软件关闭后连接被路由到失效端口（WinError 10061）"的坑，**不要回退成默认 httpx 客户端**。
+- **数据访问收口**：目录/血缘由 `src/datahub` 静态声明；`analysis / competitor / material` 已迁移到 `src/datahub/pg.py` / `neo4j.py`，新增数据访问不要再写 `psycopg.connect` / `GraphDatabase.driver`。目录端点不连库，三库全挂也应返回 200。
+- **调度器独立进程**：`src/datahub/scheduler.py` 不导入 `api.server`、不占 8001；只调度幂等任务（法规增量/质量扫描/目录快照），`ingest`/`pg --force`/`graph --clear` 永远人工执行。
 
 ## 不可破坏的契约（红线）
 
@@ -144,6 +153,7 @@ src/config.py       Settings dataclass，__post_init__ 校验必需项，缺失�
 | Agent 工具/流程变化 | 本文件、`组件工作机制.md`、`开发文档.md` §6 |
 | 新端点/字段/错误码 | `开发文档.md` §5、`README.md` API 表 |
 | 新配置项 | `开发文档.md` §2.3、本文件 |
+| 数据中台资产/端点/重建策略 | 本文件、`开发文档.md` §4.4/§5.5、README |
 | 包结构/文件移动 | 本文件、`开发文档.md` §1、`组件工作机制.md` 路径引用 |
 
 ## 排障速查
@@ -153,6 +163,7 @@ src/config.py       Settings dataclass，__post_init__ 校验必需项，缺失�
 | 症状 | 原因 / 处理 |
 |---|---|
 | 启动即退出「缺少必需配置」 | `.env` 缺 `QDRANT_URL`/`QDRANT_API_KEY`（或默认 provider 的 key） |
+| `python main.py pg` 直接退出「拒绝执行」 | 表已存在且未加 `--force`；先 `--dry-run` 确认列计划，再 `--force` |
 | 首次问答极慢 / 工具 30s 超时 | 嵌入/精排模型冷启动下载，等日志「模型预热完成」；国内设 `HF_ENDPOINT=https://hf-mirror.com` |
 | 检索质量骤降 | `data/vocab.json` 与向量数据不一致 → **换数据后必须重新 ingest** |
 | 「知识库未就绪」503 | `vocab.json` 缺失 → 先 `python main.py ingest` |

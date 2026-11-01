@@ -22,6 +22,14 @@ def _get_int(key: str, default: int) -> int:
         return default
 
 
+def _get_bool(key: str, default: bool = False) -> bool:
+    """安全读取布尔环境变量：1/true/yes/on 为真，其余为假，空值回退默认。"""
+    raw = os.getenv(key)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 # 全局配置定义
 class Settings:
     # ---- Neo4j Aura 配置 ----
@@ -88,6 +96,37 @@ class Settings:
     # ---- 限流 ----
     rate_limit_max: int = _get_int("RATE_LIMIT_MAX", 30)
     rate_limit_window: int = _get_int("RATE_LIMIT_WINDOW", 60)
+
+    # ---- 数据中台 ----
+    # 资产目录 / 血缘端点的进程内缓存秒数。0 = 关闭缓存。
+    # 目录是静态注册表，正常不会变；留 TTL 是为了将来支持“注册表热更新后生效”，
+    # 而不是每次请求都重新构造几十个资产与字段的响应。
+    data_catalog_cache_seconds: int = _get_int("DATA_CATALOG_CACHE_SECONDS", 60)
+    # 质量报告保留天数与 latest 端点缓存秒数。
+    # 报告由 scheduler 写入、API 读取；跨进程共享，故 30 秒缓存足够。
+    data_quality_retention_days: int = _get_int("DATA_QUALITY_RETENTION_DAYS", 30)
+    data_quality_cache_seconds: int = _get_int("DATA_QUALITY_CACHE_SECONDS", 30)
+
+    # ---- 数据中台：轻量调度（独立进程，见 src/datahub/scheduler.py） ----
+    # 常驻调度器默认关闭：它只做数据维护，不该因为起了 API 就被动开跑。
+    data_scheduler_enabled: bool = _get_bool("DATA_SCHEDULER_ENABLED", False)
+    data_scheduler_timezone: str = os.getenv("DATA_SCHEDULER_TIMEZONE", "Asia/Shanghai")
+    data_scheduler_regulations_cron: str = os.getenv(
+        "DATA_SCHEDULER_REGULATIONS_CRON", "30 3 * * *"
+    )
+    data_scheduler_quality_cron: str = os.getenv(
+        "DATA_SCHEDULER_QUALITY_CRON", "15 */6 * * *"
+    )
+    data_scheduler_catalog_cron: str = os.getenv(
+        "DATA_SCHEDULER_CATALOG_CRON", "0 4 * * *"
+    )
+    # 同一任务最大并发；默认 1，避免质量扫描/法规入库重叠。
+    data_scheduler_max_instances: int = _get_int("DATA_SCHEDULER_MAX_INSTANCES", 1)
+    # 错过多次只补跑一次；misfire 超过 300s 的任务直接跳过。
+    data_scheduler_coalesce: bool = _get_bool("DATA_SCHEDULER_COALESCE", True)
+    data_scheduler_misfire_grace_seconds: int = _get_int(
+        "DATA_SCHEDULER_MISFIRE_GRACE_SECONDS", 300
+    )
 
     @property
     def cors_origin_list(self) -> list[str]:
