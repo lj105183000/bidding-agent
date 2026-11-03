@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 因此：
 
 - 文档里的文件路径、函数名、端点**不代表可以在磁盘上读到**；改代码前先 `ls` 确认，不要假设。
-- 前端 Chat 全链路（SSE 流式、provider 切换、联网/深度思考开关、会话持久化与列表、点赞/点踩、停止）已接通后端；Dashboard/extract/price/material/analysis 四页仍为 mock。
+- 前端 **14 个页面**（Chat、Dashboard、Graph、GraphViz、Extract、TenderDoc、Compare、Qualification、Compliance、Deadline、PriceCompare、Material、Analysis、EvalDashboard）均已接通后端；仅 `frontend/src/data/` 保留静态示例/展示元数据。
 - **CI 是绿的**：`uv run pytest -q`（integration 默认排除）全绿；前端 `npm run build`（tsc 无错）+ `vitest run` 通过。
 - Eval Gate 的 CI 配置（Secrets / Postgres service / LLM_PROVIDER / AGENT_VERIFY_REPAIR / timeout）见 `bidding-agent/docs/开发文档.md` §10.1；本地开启核对修复用 `AGENT_VERIFY_REPAIR=1`。
 - 评测已扩为四线（agent / retrieval / retrieval_offline / rag），统一入口 `python eval/run_all.py`；另有独立 HTTP 压测 `eval/load_eval.py`。离线检索线接 PR 门禁 `.github/workflows/retrieval-offline-gate.yml`。
@@ -26,6 +26,7 @@ C:\Users\10518\bidding-agent\
 │       ├── 开发文档.md           # 面向开发者：环境/数据管道/API 契约/测试/部署/排障（最全，优先查）
 │       ├── 技术栈.md             # 选型与版本锁定、版本兼容性踩坑注记
 │       ├── 组件工作机制.md        # 20 个组件的 Mermaid 机制图解（理解"怎么跑"看这份）
+│       ├── 并行开发协作.md        # 多 Claude 子 Agent 并行开发：所有权/契约/共享资源/合并流程
 │       └── 增加Agent功能.md       # 二期功能清单
 └── frontend/                    # 前端（React 18 + Vite 5）
 ```
@@ -77,6 +78,7 @@ Vite SPA 前端（:5173，仓库根 `frontend/`）→ FastAPI（:8001）→ `Bid
 src/agent/          Agent 编排核心 —— core.py 主体，拆成 Mixin：
                     react_loop.py（ReAct ≤4 轮）/ generation.py（最终生成）
                     tool_defense.py（工具文本防泄漏）/ skills.py / prompts.py
+                    orchestration/（可选多 Agent：LangGraph 图/路由/合并，Phase 1）
                     关键：_chat_events 产出结构化事件元组，chat_stream 序列化为 SSE、
                     chat 收集为 dict —— 两条路径共用同一流程，新增逻辑只改一处。
 src/rag/            Qdrant Named Vectors（dense 512 + jieba BM25 sparse）
@@ -103,6 +105,14 @@ src/config.py       Settings dataclass，__post_init__ 校验必需项，缺失�
 - **评测历史双事实源**：`eval/trend.jsonl` 仍是**门禁事实源**（`--save` / `--gate` 行为不变）；PostgreSQL `eval_runs` / `eval_jobs` 是看板历史源，只由 `--save-db`、`eval/backfill_db.py`、手动触发写入。DB 不可用时 `/api/eval/runs|compare|jobs` 回退趋势文件并标 `storage.backend`；写库失败只告警，**不改变门禁退出码**。手动触发默认关闭（`EVAL_TRIGGER_ENABLED=0`），仅允许 `retrieval_offline`。
 - **调度器独立进程**：`src/datahub/scheduler.py` 不导入 `api.server`、不占 8001；只调度幂等任务（法规增量/质量扫描/目录快照），`ingest`/`pg --force`/`graph --clear` 永远人工执行。
 
+### 多 Agent 编排（Phase 1）
+
+- `src/agent/orchestration/`：LangGraph（0.3.x）图 → `route`（确定性规则）→ `specialists`（retrieval/data/web/compliance 并行）→ `merge` → `synthesize`。
+- `AGENT_MULTI_AGENT=off|auto|on`，**默认 off**；off 时完全走旧 ReAct，行为不变。`auto` 只对复合/多意图问题走图；`on` 供评测/A-B。依赖缺失自动回落 off。
+- specialist 复用 `react_loop._run_tool_loop`（已从 `_chat_stream_tools` 拆出），**不调用** `_generate_final`；只有 synthesizer 产 token。首 token 前失败/无有效结果自动回退旧 ReAct。
+- 新增 done 字段 `orchestration` / `agent_trace` / `agent_timings`（additive）；多 Agent 下 `tool_name` 仍是 primary specialist 的最后一个成功工具（单字符串）。
+- 评测线 `agent_multi` 与 `eval/test_cases_multi.json` 属于 Phase 1b，尚未落地；当前先用现有 `agent` 线做 flag off 回归。
+
 ## 不可破坏的契约（红线）
 
 这些被前端徽标、eval 指标或测试依赖，改动必须同步文档并通知相关成员：
@@ -110,9 +120,10 @@ src/config.py       Settings dataclass，__post_init__ 校验必需项，缺失�
 | 契约 | 要求 |
 |---|---|
 | SSE `done` 帧 | 字段 `sources / web_sources / tool_name / elapsed_ms / phase_times`；**`tool_name` 必须是单个字符串**（最后一个执行完的工具名），不是数组 |
+| 多 Agent done 字段 | `orchestration / agent_trace / agent_timings` 为 additive；多 Agent 下 `tool_name` 仍是 primary specialist 的最后一个成功工具（单字符串） |
 | 工具结果 | 统一 `{"success", "data"/"results", "error"}`，失败不抛异常 |
 | 公共导入路径 | `from src.agent import ...` / `from src.rag import ...` 的重导出不可破坏 |
-| 前端落库 | `PersistedMessage` 形状：`role/content/sources/toolCalled/toolName/image/imageName`；`thinking` 与计时**不落库** |
+| 前端落库 | `PersistedMessage` 形状：`id/role/content/sources/toolName/imageAnalyses`；`thinking` 与计时**不落库** |
 | `.env` 键名 | 见 `bidding-agent/docs/开发文档.md` §2.3 全表，新增配置项须同步文档 |
 | 安全 | 数据库查询参数化 + 字段/聚合白名单；LIKE 通配符转义 |
 | 评测历史 | `trend.jsonl` 仍是门禁事实源；`eval_runs/eval_jobs` 仅由 `--save-db`/回填/触发写入；`--save-db` 失败不改退出码；触发默认关闭、仅 `retrieval_offline` |
@@ -150,6 +161,16 @@ src/config.py       Settings dataclass，__post_init__ 校验必需项，缺失�
 - 冲突处理：`git pull origin main` 本地解决 → commit → push；**绝不 `--force` 覆盖他人分支**。
 - 分工明细与阶段排期文档已从仓库移除；如需补充，请放在 `bidding-agent/docs/` 下。
 
+## 多 Agent 并行开发（流程约定）
+
+<!-- PARALLEL-DEV:BEGIN -->
+- 只在独立 worktree + `feat/parallel/<lane>` 分支中并行；`main` 只由 integrator 合并。
+- 开工前读 `bidding-agent/docs/并行开发协作.md` 与 `.claude/parallel/lanes.json`；lane 角色定义见 `.claude/agents/`。
+- 只改本 lane 的 owned 路径；冻结文件、`api/server.py`、公共 `__init__.py`、lockfiles、文档走 CCR，由 integrator 单写。
+- 并行阶段禁止：`--save`、`--save-db`、`--cov`、`npm run build`、`main.py ingest`、8001 端口、`-m integration`、复制 `.env`。
+- 每个 PR 必须带 targeted 测试与「文档增量」；`CLAUDE.md` 与 `AGENTS.md` 的并行约定块保持镜像。
+<!-- PARALLEL-DEV:END -->
+
 ## 文档同步义务
 
 改了代码就要同步文档（对照表见 `开发文档.md` §13.4）：
@@ -162,6 +183,7 @@ src/config.py       Settings dataclass，__post_init__ 校验必需项，缺失�
 | 数据中台资产/端点/重建策略 | 本文件、`开发文档.md` §4.4/§5.5、README |
 | 评测持久化/触发/新配置 | 本文件、`开发文档.md` §2.3/§5.6/§10.2、`组件工作机制.md` §20、README |
 | 包结构/文件移动 | 本文件、`开发文档.md` §1、`组件工作机制.md` 路径引用 |
+| 并行流程 / 角色 / 所有权 / 冻结契约 | `并行开发协作.md`、`.claude/parallel/lanes.json`、`.claude/agents/` |
 
 ## 排障速查
 

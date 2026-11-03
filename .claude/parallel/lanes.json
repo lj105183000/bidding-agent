@@ -1,0 +1,403 @@
+{
+  "version": 1,
+  "contract_version": 2,
+  "base_branch": "main",
+  "base_tag": "parallel-base-v1",
+  "worktree_root": "C:/Users/10518/bidding-agent-wt",
+  "max_concurrent_lanes": 3,
+  "precedence": [
+    "integrator_only_paths: deny for every non-integrator lane",
+    "frozen_files: change requires CCR",
+    "owned_files / owned_prefixes: allow",
+    "everything else: deny"
+  ],
+  "integrator_only_paths": [
+    "bidding-agent/.env",
+    "bidding-agent/data/",
+    "bidding-agent/api/",
+    "bidding-agent/eval/trend.jsonl",
+    "bidding-agent/eval/baseline.json",
+    "bidding-agent/eval/fixtures/",
+    "bidding-agent/eval/online_samples.jsonl",
+    "bidding-agent/pyproject.toml",
+    "bidding-agent/uv.lock",
+    "frontend/package.json",
+    "frontend/package-lock.json",
+    "frontend/dist/",
+    "bidding-agent/.coverage",
+    "CLAUDE.md",
+    "AGENTS.md",
+    "README.md",
+    "bidding-agent/README.md",
+    "bidding-agent/docs/",
+    ".github/",
+    ".claude/",
+    "bidding-agent/tests/test_parallel_contracts.py",
+    "bidding-agent/tests/contracts/"
+  ],
+  "lanes": {
+    "integrator": {
+      "branch": "main",
+      "owned_prefixes": [
+        "bidding-agent/api/",
+        "bidding-agent/docs/",
+        "bidding-agent/eval/fixtures/",
+        ".github/",
+        ".claude/"
+      ],
+      "owned_files": [
+        "CLAUDE.md",
+        "AGENTS.md",
+        "README.md",
+        "bidding-agent/README.md",
+        "bidding-agent/pyproject.toml",
+        "bidding-agent/uv.lock",
+        "bidding-agent/eval/trend.jsonl",
+        "bidding-agent/eval/baseline.json",
+        "bidding-agent/eval/online_samples.jsonl",
+        "frontend/package.json",
+        "frontend/package-lock.json",
+        "bidding-agent/tests/test_parallel_contracts.py"
+      ],
+      "frozen_files": [],
+      "forbidden_prefixes": [],
+      "excluded_files": [],
+      "contract_sensitive_files": [],
+      "test_prefixes": [],
+      "verify": [
+        "full-pytest-with-cov",
+        "frontend-build-and-test",
+        "retrieval-offline-gate"
+      ],
+      "serial": true
+    },
+    "contracts-platform": {
+      "branch": "feat/parallel/contracts-platform",
+      "owned_prefixes": [
+        "bidding-agent/src/clients/",
+        "bidding-agent/src/mcp/",
+        "bidding-agent/src/constants/"
+      ],
+      "owned_files": [
+        "bidding-agent/src/config.py",
+        "bidding-agent/src/logging_config.py",
+        "bidding-agent/src/monitoring.py",
+        "bidding-agent/src/monitoring_trace.py",
+        "bidding-agent/src/langfuse_tracing.py",
+        "bidding-agent/src/langfuse_feedback.py",
+        "bidding-agent/src/log_redaction.py",
+        "bidding-agent/src/rate_limiter.py",
+        "bidding-agent/src/api_access.py",
+        "bidding-agent/src/http_client.py",
+        "bidding-agent/src/health.py",
+        "bidding-agent/src/web_search.py",
+        "bidding-agent/src/web_search_zhipu.py",
+        "bidding-agent/src/agent/constants.py"
+      ],
+      "frozen_files": [
+        "bidding-agent/src/agent/__init__.py",
+        "bidding-agent/src/rag/__init__.py",
+        "bidding-agent/src/services/regulation_store.py"
+      ],
+      "forbidden_prefixes": [
+        "bidding-agent/api/",
+        "bidding-agent/src/agent/",
+        "bidding-agent/src/rag/",
+        "bidding-agent/src/services/",
+        "bidding-agent/src/datahub/",
+        "bidding-agent/eval/",
+        "frontend/"
+      ],
+      "excluded_files": [],
+      "contract_sensitive_files": [
+        "bidding-agent/src/config.py",
+        "bidding-agent/src/agent/constants.py",
+        "bidding-agent/src/clients/base_client.py"
+      ],
+      "test_prefixes": [
+        "test_health",
+        "test_monitoring",
+        "test_langfuse_",
+        "test_log_",
+        "test_rate_limiter",
+        "test_metrics_fixes",
+        "test_deepseek_client",
+        "test_failover_policy",
+        "test_llm_fallback",
+        "test_web_rerank"
+      ],
+      "verify": ["targeted-pytest"],
+      "serial": false
+    },
+    "agent-core": {
+      "branch": "feat/parallel/agent-core",
+      "owned_prefixes": [
+        "bidding-agent/src/agent/",
+        "bidding-agent/src/tools/",
+        "bidding-agent/src/skills/"
+      ],
+      "owned_files": [
+        "bidding-agent/src/database/graph_data.py"
+      ],
+      "frozen_files": [
+        "bidding-agent/src/agent/constants.py",
+        "bidding-agent/src/agent/__init__.py"
+      ],
+      "forbidden_prefixes": [
+        "bidding-agent/api/",
+        "bidding-agent/src/rag/",
+        "bidding-agent/src/services/",
+        "bidding-agent/src/datahub/",
+        "bidding-agent/src/constants/",
+        "bidding-agent/eval/",
+        "frontend/"
+      ],
+      "excluded_files": [],
+      "contract_sensitive_files": [
+        "bidding-agent/src/agent/core.py",
+        "bidding-agent/src/agent/react_loop.py",
+        "bidding-agent/src/tools/rag_tools.py",
+        "bidding-agent/src/tools/base.py",
+        "bidding-agent/src/database/graph_data.py"
+      ],
+      "test_prefixes": [
+        "test_react_loop",
+        "test_sse_",
+        "test_tool_",
+        "test_tools_",
+        "test_verification",
+        "test_verify_",
+        "test_deep_thinking",
+        "test_planning",
+        "test_skills",
+        "test_memory",
+        "test_compaction",
+        "test_clarify",
+        "test_charts",
+        "test_phase_timing",
+        "test_dsml_",
+        "test_multiturn_retrieval",
+        "test_prompt_variant",
+        "test_fmt_functions",
+        "test_quality_hints_wiring"
+      ],
+      "verify": ["targeted-pytest"],
+      "serial": false
+    },
+    "rag": {
+      "branch": "feat/parallel/rag",
+      "owned_prefixes": [
+        "bidding-agent/src/rag/"
+      ],
+      "owned_files": [
+        "bidding-agent/scripts/build_offline_fixture.py",
+        "bidding-agent/eval/retrieval_offline_eval.py"
+      ],
+      "frozen_files": [
+        "bidding-agent/src/rag/__init__.py",
+        "bidding-agent/eval/fixtures/retrieval_offline.json"
+      ],
+      "forbidden_prefixes": [
+        "bidding-agent/api/",
+        "bidding-agent/src/agent/",
+        "bidding-agent/src/tools/",
+        "bidding-agent/src/services/",
+        "bidding-agent/src/datahub/",
+        "bidding-agent/eval/",
+        "frontend/"
+      ],
+      "excluded_files": [],
+      "contract_sensitive_files": [
+        "bidding-agent/src/rag/pipeline.py",
+        "bidding-agent/src/rag/embedder.py",
+        "bidding-agent/src/rag/regulation_store.py"
+      ],
+      "test_prefixes": [
+        "test_retrieval_offline",
+        "test_pipeline_modes",
+        "test_classify_question",
+        "test_bm25_encoder",
+        "test_reranker",
+        "test_vector_store",
+        "test_embedder_lazy_load",
+        "test_relevance_filter",
+        "test_rag_parallel_search",
+        "test_rag_timing",
+        "test_rag_corpus_fingerprint",
+        "test_ingest_cleaning",
+        "test_regulations",
+        "test_module_migration"
+      ],
+      "verify": ["targeted-pytest", "retrieval-offline-temp-trend"],
+      "serial": false
+    },
+    "services-tender": {
+      "branch": "feat/parallel/services-tender",
+      "owned_prefixes": [],
+      "owned_files": [
+        "bidding-agent/src/services/document_parser.py",
+        "bidding-agent/src/services/tender_extractor.py",
+        "bidding-agent/src/services/qualification.py",
+        "bidding-agent/src/services/change_tracker.py",
+        "bidding-agent/src/services/tender_store.py",
+        "bidding-agent/src/services/extract.py",
+        "bidding-agent/src/services/report.py"
+      ],
+      "frozen_files": [
+        "bidding-agent/src/services/__init__.py"
+      ],
+      "forbidden_prefixes": [
+        "bidding-agent/api/",
+        "bidding-agent/src/rag/",
+        "bidding-agent/src/agent/",
+        "bidding-agent/src/datahub/",
+        "bidding-agent/eval/",
+        "frontend/"
+      ],
+      "excluded_files": [],
+      "contract_sensitive_files": [
+        "bidding-agent/src/services/document_parser.py",
+        "bidding-agent/src/services/tender_extractor.py"
+      ],
+      "test_prefixes": [
+        "test_tender_document",
+        "test_tender_store",
+        "test_change_tracker",
+        "test_qualification",
+        "test_report",
+        "test_bid_schema"
+      ],
+      "verify": ["targeted-pytest", "api-consumer-smoke"],
+      "serial": false
+    },
+    "services-analysis": {
+      "branch": "feat/parallel/services-analysis",
+      "owned_prefixes": [],
+      "owned_files": [
+        "bidding-agent/src/services/analysis.py",
+        "bidding-agent/src/services/competitor.py",
+        "bidding-agent/src/services/material.py",
+        "bidding-agent/src/services/compliance.py",
+        "bidding-agent/src/services/price_compare.py",
+        "bidding-agent/src/services/regulation_store.py",
+        "bidding-agent/src/services/web_fallback.py"
+      ],
+      "frozen_files": [
+        "bidding-agent/src/services/__init__.py",
+        "bidding-agent/src/datahub/pg.py",
+        "bidding-agent/src/datahub/neo4j.py",
+        "bidding-agent/src/datahub/contract.py",
+        "bidding-agent/src/rag/regulation_store.py",
+        "bidding-agent/src/tools/compliance_tools.py"
+      ],
+      "forbidden_prefixes": [
+        "bidding-agent/api/",
+        "bidding-agent/src/rag/",
+        "bidding-agent/src/agent/",
+        "bidding-agent/src/datahub/",
+        "bidding-agent/eval/",
+        "frontend/"
+      ],
+      "excluded_files": [],
+      "contract_sensitive_files": [
+        "bidding-agent/src/services/analysis.py",
+        "bidding-agent/src/services/compliance.py"
+      ],
+      "test_prefixes": [
+        "test_analysis_service",
+        "test_competitor",
+        "test_material",
+        "test_compliance",
+        "test_web_fallback",
+        "test_module_migration"
+      ],
+      "verify": ["targeted-pytest", "api-consumer-smoke"],
+      "serial": false
+    },
+    "data-eval-platform": {
+      "branch": "feat/parallel/data-eval-platform",
+      "owned_prefixes": [
+        "bidding-agent/src/datahub/",
+        "bidding-agent/src/eval_runs/",
+        "bidding-agent/src/eval_online/",
+        "bidding-agent/src/eval_offline/",
+        "bidding-agent/eval/",
+        "bidding-agent/scripts/"
+      ],
+      "owned_files": [
+        "bidding-agent/src/database/postgresql_client.py",
+        "bidding-agent/src/database/to_postgresql.py",
+        "bidding-agent/src/database/neo4j_client.py",
+        "bidding-agent/src/database/to_neo4j.py",
+        "bidding-agent/src/database/subgraph.py",
+        "bidding-agent/src/database/image_analyses_migration.py",
+        "bidding-agent/src/database/trace_migration.py",
+        "bidding-agent/src/database/__init__.py"
+      ],
+      "frozen_files": [],
+      "forbidden_prefixes": [
+        "bidding-agent/src/database/graph_data.py",
+        "bidding-agent/api/",
+        "bidding-agent/src/services/",
+        "bidding-agent/src/rag/",
+        "bidding-agent/src/agent/",
+        "frontend/"
+      ],
+      "excluded_files": [
+        "bidding-agent/scripts/build_offline_fixture.py"
+      ],
+      "contract_sensitive_files": [
+        "bidding-agent/src/datahub/contract.py",
+        "bidding-agent/src/datahub/pg.py",
+        "bidding-agent/src/datahub/neo4j.py",
+        "bidding-agent/src/database/postgresql_client.py",
+        "bidding-agent/src/database/neo4j_client.py",
+        "bidding-agent/eval/run_all.py",
+        "bidding-agent/eval/trend.py"
+      ],
+      "test_prefixes": [
+        "test_datahub_",
+        "test_eval_",
+        "test_ragas_",
+        "test_load_eval",
+        "test_agent_eval",
+        "test_main_cli",
+        "test_to_postgresql_safety",
+        "test_pg_",
+        "test_postgres_session_lookup",
+        "test_conversation_history"
+      ],
+      "verify": ["targeted-pytest", "list-suites"],
+      "serial": false
+    },
+    "frontend": {
+      "branch": "feat/parallel/frontend",
+      "owned_prefixes": [
+        "frontend/"
+      ],
+      "owned_files": [],
+      "frozen_files": [
+        "frontend/package.json",
+        "frontend/package-lock.json"
+      ],
+      "forbidden_prefixes": [
+        "bidding-agent/",
+        ".github/",
+        "CLAUDE.md",
+        "AGENTS.md",
+        "README.md"
+      ],
+      "excluded_files": [],
+      "contract_sensitive_files": [
+        "frontend/src/lib/api.ts",
+        "frontend/src/lib/evalApi.ts",
+        "frontend/src/contexts/model.tsx"
+      ],
+      "test_prefixes": [
+        "src/"
+      ],
+      "verify": ["npm-test", "tsc-build"],
+      "serial": false
+    }
+  }
+}

@@ -34,6 +34,9 @@ dependencies = [
     "pymupdf>=1.28.2",
     "python-docx>=1.2.0",
     "python-multipart>=0.0.32",
+    # 多 Agent 编排（Phase 1）。只允许 0.3.x：
+    # ragas 0.4.x 依赖的 langchain-core 被钉在 0.3.x，langgraph 1.x 会把它拖到 1.x。
+    "langgraph>=0.3,<0.4",
 ]
 
 [project.optional-dependencies]
@@ -120,3 +123,7 @@ default = true
 [tool.uv]
 # 骨架阶段先作为非打包项目运行；模块落地后如需要可改为打包布局
 package = false
+# 防止 langgraph 的传递依赖把 ragas 的 langchain 0.3 栈拖到 1.x
+constraint-dependencies = [
+    "langchain-core>=0.3.86,<0.4",
+]

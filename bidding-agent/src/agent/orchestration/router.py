@@ -1,0 +1,165 @@
+"""确定性 specialist 路由。
+
+默认**零额外 LLM 调用**：关键词 + 技能 + `is_compound_question`。
+`AGENT_MULTI_ROUTER=llm` 的 LLM 路由留到 Phase 1b，本模块只提供规则。
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+
+from src.agent.constants import (
+    CLARIFY_MIN_QUESTION_CHARS,
+    MAX_SPECIALISTS,
+    MAX_SPECIALIST_ROUNDS,
+)
+
+#: specialist -> 工具白名单。工具名必须与 `TOOL_EXECUTORS` 一致。
+SPECIALIST_TOOLS: dict[str, tuple[str, ...]] = {
+    "retrieval": ("search_knowledge_base", "search_knowledge_graph"),
+    "data": ("query_database",),
+    "web": ("search_web", "search_web_cn", "search_exa"),
+    "compliance": ("check_tender_compliance",),
+}
+
+#: 技能 -> specialist。技能命中只作为路由信号，不替代关键词。
+SKILL_TO_AGENTS: dict[str, tuple[str, ...]] = {
+    "bid-analysis": ("data", "retrieval"),
+    "competition-landscape": ("data", "retrieval"),
+    "legal-update-monitor": ("web", "retrieval"),
+    "regulation-citation-audit": ("compliance", "retrieval"),
+    "debug-answer": ("retrieval",),
+}
+
+COMPLIANCE_KEYWORDS = (
+    "合规", "违规", "条款", "法规", "法律", "第几条", "依据", "禁止",
+    "合法性", "是否符合", "法定",
+)
+DATA_KEYWORDS = (
+    "金额", "数量", "趋势", "排行", "排名", "分布", "占比", "同比",
+    "平均", "中位数", "统计", "频次", "多少家", "top", "前几", "对比",
+)
+GRAPH_KEYWORDS = (
+    "关系", "关联", "图谱", "供应商", "采购人", "中标", "竞争",
+    "谁在做", "合作", "参与",
+)
+WEB_KEYWORDS = (
+    "最新", "今年", "新闻", "政策", "实时", "近期", "发布", "网上", "外部",
+)
+
+
+@dataclass(frozen=True)
+class AgentTask:
+    agent: str
+    index: int
+    task: str
+    tools: tuple[str, ...]
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def _hit(text: str, keywords: tuple[str, ...]) -> bool:
+    return any(word in text for word in keywords)
+
+
+def _skill_agents(question: str, skills) -> list[str]:
+    if not skills:
+        return []
+    try:
+        from src.agent.skills import _match_skills
+
+        matched = _match_skills(question, skills)
+    except Exception:  # noqa: BLE001 - 技能是增强信号，失败不影响路由
+        return []
+    out: list[str] = []
+    for skill in matched:
+        name = str((skill or {}).get("name") or "")
+        for agent in SKILL_TO_AGENTS.get(name, ()):
+            if agent not in out:
+                out.append(agent)
+    return out
+
+
+def route_question(
+    question: str,
+    *,
+    web_enabled: bool = False,
+    skills=None,
+) -> list[AgentTask]:
+    """按问题特征产出有序 specialist 列表；至少返回 retrieval。"""
+    text = str(question or "")
+    intents: list[str] = []
+
+    def add(agent: str) -> None:
+        if agent == "web" and not web_enabled:
+            return
+        if agent not in intents:
+            intents.append(agent)
+
+    if _hit(text, COMPLIANCE_KEYWORDS):
+        add("compliance")
+    if _hit(text, DATA_KEYWORDS):
+        add("data")
+    if _hit(text, GRAPH_KEYWORDS):
+        add("retrieval")
+    if web_enabled and _hit(text, WEB_KEYWORDS):
+        add("web")
+    for agent in _skill_agents(text, skills):
+        add(agent)
+
+    if not intents:
+        intents = ["retrieval"]
+    # 复合问题至少带一个通用检索；否则 specialist 可能只看到局部数据。
+    try:
+        from src.agent.planning import is_compound_question
+
+        compound = is_compound_question(text)
+    except Exception:  # noqa: BLE001
+        compound = False
+    if compound and "retrieval" not in intents:
+        intents.append("retrieval")
+
+    selected = intents[:MAX_SPECIALISTS]
+    return [
+        AgentTask(
+            agent=agent,
+            index=index,
+            task=text,
+            tools=SPECIALIST_TOOLS[agent],
+        )
+        for index, agent in enumerate(selected)
+        if agent in SPECIALIST_TOOLS
+    ]
+
+
+def should_use_multi_agent(
+    question: str,
+    mode: str,
+    tasks: list[AgentTask],
+) -> bool:
+    """决定是否真的走图；`auto` 只对复合/多意图问题启用。"""
+    if mode not in ("auto", "on") or not tasks:
+        return False
+    # 过短/疑似需要澄清的问题交给旧 ReAct，沿用现有 clarify 逻辑。
+    if len(str(question or "").strip()) < CLARIFY_MIN_QUESTION_CHARS:
+        return False
+    if mode == "on":
+        return True
+    if len(tasks) >= 2:
+        return True
+    try:
+        from src.agent.planning import is_compound_question
+
+        return bool(is_compound_question(str(question or "")))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+__all__ = [
+    "AgentTask",
+    "MAX_SPECIALIST_ROUNDS",
+    "SPECIALIST_TOOLS",
+    "route_question",
+    "should_use_multi_agent",
+]

@@ -16,6 +16,7 @@ import contextvars
 import json
 import logging
 import time
+from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import TYPE_CHECKING, Any
@@ -76,6 +77,30 @@ _FINAL_CONSTRAINT = (
     "请基于以上工具结果直接输出最终中文回答，"
     "不要输出任何函数调用格式，不要复述你的分析过程。"
 )
+
+
+@dataclass
+class ToolLoopResult:
+    """一次工具循环的确定性结果。
+
+    `_run_tool_loop` 只负责「决策 → 执行 → 回填」，不负责最终生成；
+    旧 ReAct 路径与多 Agent specialist 共用同一份结果。
+    """
+
+    messages: list
+    tool_called: bool
+    tool_name: str
+    tool_names: list
+    tool_timings: list
+    sources: list
+    web_sources: list
+    succeeded_tools: list
+    tool_output_text: list
+    charts: list
+    rag_timings: list
+    rounds: int
+    hit_cap: bool
+    clarification: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +204,7 @@ class ReActMixin:
     # --- 工具执行 ---
 
     @staticmethod
-    def _allowed_tool_names(meta: dict) -> set:
+    def _allowed_tool_names(meta: dict, allowed_tools=None) -> set:
         """本轮允许执行的工具名集合。
 
         ★ 为什么需要执行侧的白名单（实测踩坑，这是**安全边界**而非便利性）
@@ -198,7 +223,11 @@ class ReActMixin:
         names = set(BASE_TOOL_NAMES)
         if meta.get("web_search_enabled"):
             names |= set(WEB_TOOL_NAMES)
-        return names
+        if allowed_tools is None:
+            return names
+        # 显式 allowlist 只在"当前请求允许的工具"内生效：联网关闭时
+        # specialist 即使请求了 web 工具也不能执行（安全边界优先）。
+        return names & {str(n) for n in allowed_tools}
 
     @staticmethod
     def _take_rag_timing() -> dict | None:
@@ -703,7 +732,8 @@ class ReActMixin:
         return f"[工具 {name} 结果]\n{text}", calls
 
     def _resolve_tool_schemas(self, web_search_enabled: bool = False,
-                              clarify_allowed: bool = False) -> list:
+                              clarify_allowed: bool = False,
+                              allowed_tools: list | tuple | None = None) -> list:
         """产出本轮可暴露给大模型的工具定义（OpenAI function-calling 格式）。
 
         为什么需要：项目原先只靠 SYSTEM_PROMPT 的文字描述告诉模型"有哪些工具"，
@@ -720,7 +750,13 @@ class ReActMixin:
         不暴露时模型连这个工具的定义都看不到，**结构上**不可能调用它——
         这比"暴露但在拦截层忽略"更稳：后者依赖模型不去调，而模型的行为不可控。
         """
-        names = list(BASE_TOOL_NAMES) + (list(WEB_TOOL_NAMES) if web_search_enabled else [])
+        if allowed_tools is not None:
+            enabled = set(BASE_TOOL_NAMES)
+            if web_search_enabled:
+                enabled |= set(WEB_TOOL_NAMES)
+            names = [str(n) for n in allowed_tools if str(n) in enabled]
+        else:
+            names = list(BASE_TOOL_NAMES) + (list(WEB_TOOL_NAMES) if web_search_enabled else [])
         if not clarify_allowed and CLARIFY_TOOL_NAME in names:
             # 追问工具只服务于首轮澄清（见 core._chat_events 的 clarify_allowed）
             names = [n for n in names if n != CLARIFY_TOOL_NAME]
@@ -874,10 +910,53 @@ class ReActMixin:
         return messages
 
     def _chat_stream_tools(self, messages: list, client, meta: dict, deep_thinking: bool = False):
-        """ReAct 多轮循环主体。产出 status 事件，最终转入 _generate_final 产出 token 事件。
+        """旧 ReAct 路径：工具循环 + 最终生成（保持既有事件序列不变）。"""
+        result = yield from self._run_tool_loop(messages, client, meta)
+        if result.clarification is not None:
+            return
+        yield from self._generate_final(result.messages, client, meta, deep_thinking)
 
-        每轮：chat_raw 决策 → 解析调用 → 无调用则进入最终生成 / 有调用则执行并回填结果。
-        决策轮检出畸形工具文本时做一次约束重试；仍无法解析则视为无调用。
+    @staticmethod
+    def _tool_loop_result(
+        meta: dict,
+        messages: list,
+        rounds: int,
+        *,
+        hit_cap: bool,
+        clarification: dict | None,
+    ) -> ToolLoopResult:
+        """从 meta 收敛一次工具循环的结果；所有字段都是普通 Python 值。"""
+        return ToolLoopResult(
+            messages=list(messages),
+            tool_called=bool(meta.get("tool_called")),
+            tool_name=str(meta.get("tool_name") or ""),
+            tool_names=list(meta.get("tool_call_names") or []),
+            tool_timings=list(meta.get("tool_timings") or []),
+            sources=list(meta.get("sources") or []),
+            web_sources=list(meta.get("web_sources") or []),
+            succeeded_tools=list(meta.get("succeeded_tools") or []),
+            tool_output_text=list(meta.get("tool_output_text") or []),
+            charts=list(meta.get("charts") or []),
+            rag_timings=list(meta.get("rag_timings") or []),
+            rounds=int(rounds or 0),
+            hit_cap=bool(hit_cap),
+            clarification=clarification,
+        )
+
+    def _run_tool_loop(
+        self,
+        messages: list,
+        client,
+        meta: dict,
+        *,
+        allowed_tools: list | tuple | None = None,
+        max_rounds: int = MAX_TOOL_ROUNDS,
+        agent_id: str = "",
+    ):
+        """单个 agent 的 ReAct 工具循环；返回 ToolLoopResult，不产 token、不调最终生成。
+
+        这是旧 `_chat_stream_tools` 的机械拆分：旧路径只是在此结果之后接
+        `_generate_final`，因此默认参数下事件序列、轮次与阶段名完全不变。
         """
         conversation = list(messages)
         # 检索提示：多轮时带上上一轮用户问题，经 `_execute_tool` 作为第二个参数
@@ -886,12 +965,19 @@ class ReActMixin:
         # 带上文可少走弯路。没有历史时它就是当轮原问题。
         question = str(meta.get("retrieval_hint") or meta.get("question") or "")
         # 按 meta 里记录的开关决定暴露哪些工具（core._chat_events 已把开关放进 meta）
-        tool_schemas = self._resolve_tool_schemas(
-            bool(meta.get("web_search_enabled")),
-            # 仅在首轮且无历史时把追问工具暴露给模型（判定在
-            # `core._chat_events` 组装 meta 时完成，见 `clarify_allowed`）
-            clarify_allowed=bool(meta.get("clarify_allowed")),
-        )
+        # 旧路径必须保持原调用签名：测试会把这两个方法 monkeypatch 成
+        # 1/2 参数的 lambda，多传一个 None 也会 TypeError。
+        if allowed_tools is None:
+            tool_schemas = self._resolve_tool_schemas(
+                bool(meta.get("web_search_enabled")),
+                clarify_allowed=bool(meta.get("clarify_allowed")),
+            )
+        else:
+            tool_schemas = self._resolve_tool_schemas(
+                bool(meta.get("web_search_enabled")),
+                clarify_allowed=bool(meta.get("clarify_allowed")),
+                allowed_tools=allowed_tools,
+            )
         if tool_schemas:
             logger.info(
                 "本轮暴露工具 %d 个: %s",
@@ -905,7 +991,10 @@ class ReActMixin:
             if note:
                 conversation = self._append_plan_note(conversation, note)
 
-        for round_no in range(1, MAX_TOOL_ROUNDS + 1):
+        hit_cap = False
+        rounds = 0
+        for round_no in range(1, max_rounds + 1):
+            rounds = round_no
             # 状态序列对齐开发文档 §6.3：
             # 检索与搜索 → 分析检索结果 → 补充检索（第N轮）→ ... → 生成回答
             if round_no == 1:
@@ -960,12 +1049,19 @@ class ReActMixin:
                     round_no, len(clarify.get("questions") or []),
                 )
                 yield "clarify", clarify
-                return
+                return self._tool_loop_result(
+                    meta, conversation, rounds,
+                    hit_cap=False, clarification=clarify,
+                )
 
             if round_no > 1:
                 yield "status", f"正在补充检索（第{round_no - 1}轮）..."
             t1 = time.monotonic()
-            allowed = self._allowed_tool_names(meta)
+            allowed = (
+                self._allowed_tool_names(meta, allowed_tools)
+                if allowed_tools is not None
+                else self._allowed_tool_names(meta)
+            )
             # ★ 一轮内的多个工具**并行**执行，且同参数重复调用只跑一次
             #   （见 `_execute_tool_batch`：实测串行时阶段耗时 = 各工具之和）
             batch = self._execute_tool_batch(calls, allowed, question)
@@ -983,6 +1079,8 @@ class ReActMixin:
                     "sources": len(sources or []),
                     "chars": len(text or ""),
                 }
+                if agent_id:
+                    _timing["agent"] = agent_id
                 if was_dup:
                     _timing["deduped"] = True
                 # 把 RAG 检索耗时附在该工具的条目上——用户看到"检索知识库 1.2s"
@@ -1062,8 +1160,12 @@ class ReActMixin:
             })
         else:
             # 达到轮次上限：不再决策，直接带着已有工具结果进入最终生成
-            logger.info("ReAct 循环达到 %d 轮上限，进入最终生成", MAX_TOOL_ROUNDS)
+            hit_cap = True
+            logger.info("ReAct 循环达到 %d 轮上限，进入最终生成", max_rounds)
 
         final_messages = self._clean_for_final(conversation)
         meta["last_stream_messages"] = final_messages
-        yield from self._generate_final(final_messages, client, meta, deep_thinking)
+        return self._tool_loop_result(
+            meta, final_messages, rounds,
+            hit_cap=hit_cap, clarification=None,
+        )

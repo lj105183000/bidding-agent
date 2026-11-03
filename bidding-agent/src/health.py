@@ -429,6 +429,12 @@ def config_snapshot() -> dict[str, Any]:
             "memory": _truthy(os.getenv("AGENT_MEMORY", "1")),
             "compaction": _truthy(os.getenv("AGENT_COMPACT", "1")),
             "rerank": bool(getattr(settings, "rerank_enabled", False)),
+            # 多 Agent 编排：显式暴露开关与依赖可用性，避免"功能没生效"难排查
+            "multi_agent": (os.getenv("AGENT_MULTI_AGENT", "off") or "off").strip().lower(),
+            "multi_agent_router": (
+                os.getenv("AGENT_MULTI_ROUTER", "off") or "off"
+            ).strip().lower(),
+            "multi_agent_available": _module_available("langgraph"),
         },
         "logging": {
             "format": os.getenv("LOG_FORMAT", "") or "auto",
@@ -439,6 +445,16 @@ def config_snapshot() -> dict[str, Any]:
 
 def _truthy(value: str) -> bool:
     return str(value or "").strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _module_available(name: str) -> bool:
+    """依赖是否可导入；不真正加载模块，缺依赖时健康检查也能返回。"""
+    try:
+        import importlib.util
+
+        return importlib.util.find_spec(name) is not None
+    except Exception:  # noqa: BLE001 - 探测失败按不可用处理
+        return False
 
 
 # ---------------------------------------------------------------------------

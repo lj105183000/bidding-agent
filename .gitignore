@@ -55,6 +55,11 @@ Thumbs.db
 *.tmp
 ~$*
 
+# ---------- 并行开发临时文件 ----------
+.parallel/
+.claude/settings.local.json
+bidding-agent/gate-*.json
+
 # ---------- 大文件 / 安装包（禁止入库） ----------
 招投标采购Agent项目讲解/99_软件下载/
 lj_rag_agent/

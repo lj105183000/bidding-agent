@@ -39,6 +39,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Iterator
 from typing import Any
 
@@ -69,7 +70,43 @@ class BaseLLMClient:
     #: 用途：思考模式 + `tools` 的请求**必须回传历史 `reasoning_content`**，
     #: 否则 API 返回 400（DeepSeek 官方明确要求，见「思考模式」文档的工具调用节）。
     #: 返回值只能是字符串，故用属性把思维链带出来。**每轮覆盖**。
-    last_reasoning: str = ""
+    #:
+    #: ★ 为什么改成 thread-local property（多 Agent 编排的前置）
+    #: ------------------------------------------------------
+    #: 客户端实例在 `_provider_clients` 里跨请求缓存复用。多 Agent 并行时
+    #: 多个 specialist 可能同时调同一个 cached client；若 `last_reasoning`
+    #: 是普通实例属性，A 的思维链会被 B 覆盖，回传的上下文与请求不符
+    #: （甚至触发 API 400）。thread-local 让每个线程各存一份，单线程行为不变。
+    @property
+    def last_reasoning(self) -> str:
+        tls = self.__dict__.get("_reasoning_tls")
+        if tls is None:
+            tls = threading.local()
+            self.__dict__["_reasoning_tls"] = tls
+        return getattr(tls, "value", "")
+
+    @last_reasoning.setter
+    def last_reasoning(self, value: str) -> None:
+        tls = self.__dict__.get("_reasoning_tls")
+        if tls is None:
+            tls = threading.local()
+            self.__dict__["_reasoning_tls"] = tls
+        tls.value = str(value or "")
+
+    def clone(self) -> "BaseLLMClient":
+        """为并行 specialist 复制一个独立客户端。
+
+        - 不共享 `last_reasoning`（thread-local 状态重新创建）；
+        - 不继承 `trace_recorder`（记录器随请求挂载，由编排层统一挂）；
+        - 关闭思考模式（specialist 只做检索/分析，省 token 与延迟）。
+        """
+        import copy
+
+        new = copy.copy(self)
+        new.__dict__.pop("_reasoning_tls", None)
+        new.trace_recorder = None
+        new._thinking_enabled = False
+        return new
 
     #: 当前是否开启思考模式（由调用方按请求设置，见 `set_thinking`）。
     _thinking_enabled: bool = False

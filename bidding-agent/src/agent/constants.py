@@ -12,6 +12,23 @@ MAX_HISTORY_ROUNDS = 5       # 对话历史保留轮数（1 轮 = user + assista
 MAX_TOOL_ROUNDS = 4          # ReAct 工具轮次上限（不含最终生成回合）
 TOOL_TIMEOUT_SECONDS = 30    # 单个工具执行超时；超时按工具失败处理而非中断整个回答
 
+# --- 多 Agent 编排（LangGraph，Phase 1） ---
+#
+# 默认 off：旧 ReAct 行为完全不变。auto 只对复合/多意图问题走图；
+# on 全部走图（评测/A-B 用）。保延迟优先：专家并行 + 每专家 2 轮 + 总 deadline。
+AGENT_MULTI_DEFAULT = "off"
+MAX_SPECIALISTS = 3
+MAX_SPECIALIST_ROUNDS = 2
+MULTI_AGENT_DEADLINE_S = 50.0
+MULTI_AGENT_SPECIALIST_TIMEOUT_S = 22.0
+MULTI_AGENT_IDLE_TIMEOUT_S = 35.0
+MULTI_AGENT_MAX_LLM_CALLS = 8
+MULTI_AGENT_LLM_CONCURRENCY = 4
+MULTI_AGENT_TOOL_CONCURRENCY = 4
+MULTI_AGENT_ROUTER_TIMEOUT_S = 5.0
+MULTI_AGENT_SYNTHESIS_MAX_CHARS = 12000
+MULTI_AGENT_PER_AGENT_OUTPUT_CHARS = 4000
+
 # --- 流式输出 ---
 #
 # ★ STREAM_FLUSH_CHARS 是**安全参数**，其下界已实测标定，不要凭感觉调
