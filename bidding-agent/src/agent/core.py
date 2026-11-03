@@ -491,6 +491,53 @@ class BiddingAgent(ReActMixin, GenerationMixin, ToolDefenseMixin):
         # 显式关闭才关：默认开启
         return raw not in ("0", "false", "no", "off")
 
+    def _chat_stream_multi_agent(
+        self,
+        prepared,
+        messages: list,
+        client,
+        meta: dict,
+        deep_thinking: bool,
+        *,
+        question: str,
+        history: list,
+        session_id: str,
+        provider: str,
+        web_enabled: bool,
+    ):
+        """多 Agent 路径；图在首 token 前失败/无有效结果时回退旧 ReAct。"""
+        from src.agent.orchestration.runtime import (
+            LegacyFallback,
+            run_multi_agent_stream,
+        )
+
+        try:
+            yield from run_multi_agent_stream(
+                self,
+                prepared,
+                question=question,
+                history=history,
+                session_id=session_id,
+                provider=provider,
+                web_enabled=web_enabled,
+                deep_thinking_enabled=deep_thinking,
+                meta=meta,
+            )
+        except LegacyFallback:
+            logger.info("多 Agent 无有效专家结果，回退旧 ReAct")
+            meta.setdefault("orchestration", {})["fallback"] = "legacy"
+            yield from self._chat_stream_tools(
+                messages, client, meta, deep_thinking
+            )
+        except Exception:  # noqa: BLE001 - 首 token 前失败可安全回退
+            logger.exception("多 Agent 编排失败")
+            if meta.get("streamed"):
+                raise
+            meta.setdefault("orchestration", {})["fallback"] = "legacy"
+            yield from self._chat_stream_tools(
+                messages, client, meta, deep_thinking
+            )
+
     def _chat_events(  # noqa: PLR0913 - 编排入口，参数多于一般函数属预期
         self, question: str, history: list = None,
         web_search_enabled: bool = False, provider: str = "",
@@ -684,9 +731,44 @@ class BiddingAgent(ReActMixin, GenerationMixin, ToolDefenseMixin):
             # 为什么在 core 层拦而不是让 react_loop 自己攒：
             # reset 事件（防泄漏清空重来）也经过这里，在此累积能保证
             # 攒到的就是**用户最终看到的那份**，与前端语义一致。
-            for event_type, payload in self._chat_stream_tools(
-                messages, client, meta, deep_thinking_enabled
-            ):
+            # 多 Agent 预路由：默认 off；auto/on 且问题适合时才走图。
+            multi_run = None
+            try:
+                from src.agent.orchestration.mode import multi_agent_mode
+
+                mode = multi_agent_mode()
+                if mode != "off":
+                    # 只在开启时 import runtime/graph，避免 off 路径加载编排包。
+                    from src.agent.orchestration.runtime import prepare_multi_agent
+
+                    multi_run = prepare_multi_agent(
+                        question,
+                        web_enabled=web_search_enabled,
+                        skills=self.skills,
+                        mode=mode,
+                    )
+            except Exception:  # noqa: BLE001 - 多 Agent 是增强路径，失败回退旧 ReAct
+                logger.exception("多 Agent 预路由失败，回退旧 ReAct")
+                multi_run = None
+
+            if multi_run is not None:
+                stream = self._chat_stream_multi_agent(
+                    multi_run,
+                    messages,
+                    client,
+                    meta,
+                    deep_thinking_enabled,
+                    question=question,
+                    history=history or [],
+                    session_id=session_id,
+                    provider=provider,
+                    web_enabled=web_search_enabled,
+                )
+            else:
+                stream = self._chat_stream_tools(
+                    messages, client, meta, deep_thinking_enabled
+                )
+            for event_type, payload in stream:
                 if event_type == "token":
                     meta["answer_text"] = meta.get("answer_text", "") + str(payload)
                 elif event_type == "reset":
@@ -1097,6 +1179,10 @@ class BiddingAgent(ReActMixin, GenerationMixin, ToolDefenseMixin):
             #   · 回答是模型写的自然语言，数字可能被改写或省略
             #   · 只有后端见过工具的**原始输出**，那才是唯一事实来源
             "charts": meta.get("charts") or [],
+            # 多 Agent 可观测字段（additive；旧路径为 None/[]）
+            "orchestration": meta.get("orchestration"),
+            "agent_trace": meta.get("agent_trace") or [],
+            "agent_timings": meta.get("agent_timings") or [],
             "provider": meta.get("llm_provider") or "",
             "provider_chain": meta.get("llm_provider_chain") or [],
             "provider_switch_count": meta.get("llm_provider_switches") or 0,

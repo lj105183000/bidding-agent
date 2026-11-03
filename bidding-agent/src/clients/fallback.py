@@ -171,6 +171,29 @@ class FallbackLLMClient(BaseLLMClient):
         #: 因冷却被跳过的次数（可观测性：能看出"主 provider 一直坏着"）
         self._cooldown_hits: int = 0
 
+    def clone(self) -> "FallbackLLMClient":
+        """为并行 specialist 复制一条独立候选链。
+
+        底层客户端也各自 `clone()`：共享同一个实例会让 `last_reasoning`、
+        思考开关、trace_recorder 在多个 specialist 之间串写。
+        冷却/切换计数不复制——新请求从干净状态开始。
+        """
+        original = self._resolver
+        cache: dict[str, BaseLLMClient] = {}
+
+        def resolver(name: str):
+            key = str(name or "").strip().lower()
+            client = cache.get(key)
+            if client is None:
+                base = original(name)
+                client = base.clone() if hasattr(base, "clone") else base
+                cache[key] = client
+            return client
+
+        new = type(self)(list(self._chain), resolver)
+        new._thinking_enabled = False
+        return new
+
     # --- 展示 ---
 
     @property

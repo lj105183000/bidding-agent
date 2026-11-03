@@ -11,15 +11,16 @@
 - 联网搜索、深度思考开关
 - 会话持久化与历史会话列表（PostgreSQL）
 - 回答来源标注（知识库引用 + 网络来源）、点赞/点踩反馈
+- 多 Agent 编排（Phase 1，可选）：`AGENT_MULTI_AGENT=auto/on` 时按问题并行调用检索/数据/联网/合规专家，再综合生成；默认 off，旧 ReAct 行为不变
 
-其余页面（Dashboard / 招标信息提取 Extract / 价格对比 PriceCompare / 物资 Material / 分析 Analysis）暂为 mock 数据展示，属二期功能。
+其余页面（Dashboard / 招标信息提取 Extract / 招标文件 / 比价 Compare / 资格 Qualification / 合规 Compliance / 截止 Deadline / 价格对比 PriceCompare / 物资 Material / 分析 Analysis / 图谱 / 评测）均已接入后端 API；仅部分静态示例/展示元数据保留在 `frontend/src/data/`。
 
 ## 技术栈
 
 | 层 | 技术 |
 |---|---|
 | 后端 | Python 3.12 · FastAPI · uvicorn（依赖用 uv 管理） |
-| Agent 编排 | 自研 ReAct 循环（≤4 轮工具调用）+ 技能匹配 + 工具防泄漏 |
+| Agent 编排 | 自研 ReAct 循环（≤4 轮工具调用）+ 技能匹配 + 工具防泄漏；可选 LangGraph 0.3 多 Agent 编排（`AGENT_MULTI_AGENT`） |
 | 检索 | Qdrant Named Vectors（dense 512 + jieba BM25 sparse）· Prefetch/RRF 混合检索 · BGE CrossEncoder 精排 |
 | LLM | DeepSeek / 智谱 GLM / vLLM·Ollama（OpenAI 兼容）/ 视觉模型 |
 | 数据 | Neo4j 知识图谱 · PostgreSQL 会话与反馈 · Qdrant 向量库 |
