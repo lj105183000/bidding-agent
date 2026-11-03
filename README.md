@@ -88,6 +88,12 @@ uv run uvicorn api.server:app --host 0.0.0.0 --port 8001
 | `python eval/ragas_eval.py` | RAG 质量评测（LLM-as-Judge） |
 | `python eval/agent_eval.py` | Agent 工具选择准确率 + 延迟 + token/成本 |
 | `python eval/load_eval.py --mode ask --concurrency 1,5,20 --requests 50` | HTTP 并发压测（ask 冒烟 / chat 正式） |
+| `python eval/run_all.py --suites retrieval_offline --save --save-db` | 评测结果同时写趋势文件与 PostgreSQL（看板历史） |
+| `python eval/backfill_db.py --dry-run` / 无 `--dry-run` | 预览 / 幂等回填历史趋势到 PostgreSQL |
+
+## 评测历史与看板
+
+`/eval` 看板展示离线/在线指标、运行历史与两次运行对比。评测结果默认写 `eval/trend.jsonl`（门禁事实源）；加 `--save-db` 写入 PostgreSQL `eval_runs`，`python eval/backfill_db.py` 可回填既有历史。手动触发默认关闭（`EVAL_TRIGGER_ENABLED=1` 开启），且只支持 `retrieval_offline`；昂贵评测仍走 GitHub Actions 的 Eval Gate。
 
 ## 数据中台（只读）
 

@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -894,6 +895,67 @@ def parse_suite_list(raw: str, flag: str) -> list[str]:
     return items
 
 
+#: 手动触发时由 API 注入的 run_id。限制字符集，避免它进了日志路径或 SQL 参数后
+#: 产生意外（虽然走参数化，日志文件名仍直接用它）。
+_RUN_ID_SAFE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+#: 评测结果来源。未知值归一到 cli，保持 DB 里 source 的取值可枚举。
+_RUN_SOURCES = frozenset({"cli", "api", "ci", "backfill", "trend_file"})
+
+
+def _env_run_id() -> str:
+    raw = (os.getenv("EVAL_RUN_ID") or "").strip()
+    if not raw:
+        return ""
+    if _RUN_ID_SAFE.fullmatch(raw):
+        return raw
+    print(
+        f"⚠️ 忽略非法的 EVAL_RUN_ID（仅允许字母/数字/._:-，最长 128）：{raw!r}"
+    )
+    return ""
+
+
+def _env_run_source() -> str:
+    raw = (os.getenv("EVAL_RUN_SOURCE") or "").strip().lower()
+    return raw if raw in _RUN_SOURCES else "cli"
+
+
+def persist_report_to_db(
+    report: EvalReport,
+    *,
+    source: str | None = None,
+    job_id: str | None = None,
+    store=None,
+) -> bool:
+    """把本次报告写入 PostgreSQL（轻量评测中台）。
+
+    ★ 为什么失败只告警、不改退出码
+    --------------------------
+    门禁的职责是回答“这次改动有没有让指标退化”，数据库只是历史展示。
+    数据库挂了却让 CI 变红，会把“基础设施故障”误报成“质量退化”，
+    久而久之没人再信门禁。故这里吞掉异常，趋势文件仍按原逻辑落盘。
+
+    `store` 可注入，便于单测不连库。
+    """
+    try:
+        from src.eval_runs.records import record_from_report
+
+        if store is None:
+            from src.eval_runs.store import save_record as store
+        record = record_from_report(
+            report, source=source or "cli", job_id=job_id
+        )
+        result = store(record)
+        print(f"评测结果已写入数据库（{result}）：{report.run_id}")
+        return True
+    except Exception as exc:  # noqa: BLE001 - 数据库故障不能影响评测/门禁
+        print(
+            f"⚠️ 评测数据库写入失败（{type(exc).__name__}: {exc}）；"
+            "已保留趋势文件，不影响评测结果与门禁"
+        )
+        return False
+
+
 def main() -> int:
     setup_stdio()
     parser = argparse.ArgumentParser(description="统一 Agent 评估体系")
@@ -913,6 +975,13 @@ def main() -> int:
                         help="联网模式。默认 off：联网引入外部不确定性，让指标不可比")
     parser.add_argument("--json", default="", help="把完整报告写到指定文件")
     parser.add_argument("--save", action="store_true", help="存入趋势文件")
+    parser.add_argument(
+        "--save-db", action="store_true",
+        help=(
+            "把本次报告写入 PostgreSQL（轻量评测中台）。"
+            "与 --save 相互独立：触发接口只传 --save-db，不碰趋势文件"
+        ),
+    )
     parser.add_argument("--gate", action="store_true", help="与最近一次比，退化则非零退出")
     parser.add_argument("--tolerance", type=float, default=0.02,
                         help="门禁容差（默认 0.02，避免浮点与正常波动误报）")
@@ -987,6 +1056,12 @@ def main() -> int:
 
     started = time.perf_counter()
     report = build_report(suites, max(args.limit, 0), args.web_mode, repeat=args.repeat)
+
+    # 手动触发会用 job_id 作为 run_id，让 eval_jobs 与 eval_runs 能对上。
+    env_run_id = _env_run_id()
+    if env_run_id:
+        report.run_id = env_run_id
+
     print()
     print(render_text(report))
     print(f"耗时 {time.perf_counter() - started:.1f}s")
@@ -1027,6 +1102,15 @@ def main() -> int:
 
         append_report(report, trend_path)
         print(f"已存入趋势文件（累计 {len(load_history(trend_path))} 次运行）")
+
+    # ★ 数据库写入与趋势文件**相互独立**：触发接口只传 --save-db，
+    #   不碰趋势文件；数据库失败也只告警，不影响下面的门禁退出码。
+    if args.save_db:
+        persist_report_to_db(
+            report,
+            source=_env_run_source(),
+            job_id=(os.getenv("EVAL_JOB_ID") or "").strip() or None,
+        )
 
     # ★ 分线退出码：把"哪些线算数"从全局收窄到分线，这是拆 CI job 的前提。
     #   决策放在 `eval.trend.decide_exit_code`（纯函数），便于单测覆盖。

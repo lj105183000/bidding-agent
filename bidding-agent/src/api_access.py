@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import os
 
 from fastapi import HTTPException, Request
 
@@ -45,6 +46,10 @@ logger = logging.getLogger(__name__)
 
 #: 环境变量名：配置后 `/api/logs` 需要 `X-API-Key: <值>`。
 LOG_API_KEY_ENV = "LOG_API_KEY"
+
+#: 环境变量名：配置后 `/api/eval/trigger` 需要 `X-API-Key: <值>`。
+#: 与 LOG_API_KEY 分开，避免为了看日志而顺带开放“能启动评测进程”的权限。
+EVAL_TRIGGER_API_KEY_ENV = "EVAL_TRIGGER_API_KEY"
 
 #: 携带 key 的请求头（也接受 `Authorization: Bearer <key>`）。
 _HEADER = "x-api-key"
@@ -76,15 +81,13 @@ def _presented_key(request: Request) -> str:
     return ""
 
 
-def require_logs_access(request: Request) -> None:
-    """`/api/logs` 的访问控制。**不满足时抛 403**。
+def _require_access(request: Request, *, key_env: str, endpoint: str) -> None:
+    """通用访问控制：配了 key 只认 key；没配只允许直连本机。
 
-    FastAPI 的 `Depends` 里调用；纯函数、不依赖全局状态
-    （每次读环境变量，便于测试 monkeypatch 与运行时改配置）。
+    抽出来是为了让 `/api/logs` 与 `/api/eval/trigger` 共用同一套代理判断，
+    避免两个端点各写一份、日后在 X-Forwarded-For 处理上分叉。
     """
-    import os
-
-    expected = (os.getenv(LOG_API_KEY_ENV) or "").strip()
+    expected = (os.getenv(key_env) or "").strip()
 
     # ① 配了 key：只认 key（不看 IP —— key 就是更强的凭据）
     if expected:
@@ -93,7 +96,8 @@ def require_logs_access(request: Request) -> None:
         # 而 secrets.compare_digest 会掩盖"key 配错"这种更常见的问题。
         if got != expected:
             logger.warning(
-                "拒绝 /api/logs 访问：API key 不匹配（来源 %s）",
+                "拒绝 %s 访问：API key 不匹配（来源 %s）",
+                endpoint,
                 getattr(getattr(request, "client", None), "host", "?"),
             )
             raise HTTPException(status_code=403, detail="需要有效的 X-API-Key")
@@ -106,28 +110,40 @@ def require_logs_access(request: Request) -> None:
     forwarded = request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip")
     if forwarded:
         logger.warning(
-            "拒绝 /api/logs 访问：请求经过代理（X-Forwarded-For=%s）但未配置 %s",
-            forwarded[:60], LOG_API_KEY_ENV,
+            "拒绝 %s 访问：请求经过代理（X-Forwarded-For=%s）但未配置 %s",
+            endpoint, forwarded[:60], key_env,
         )
         raise HTTPException(
             status_code=403,
-            detail=(
-                f"经代理访问 /api/logs 需要配置 {LOG_API_KEY_ENV} 并携带 X-API-Key"
-            ),
+            detail=f"经代理访问 {endpoint} 需要配置 {key_env} 并携带 X-API-Key",
         )
 
     host = getattr(getattr(request, "client", None), "host", None)
     if not _is_loopback(host):
-        logger.warning("拒绝 /api/logs 访问：非本机来源（%s）", host)
+        logger.warning("拒绝 %s 访问：非本机来源（%s）", endpoint, host)
         raise HTTPException(
             status_code=403,
-            detail=(
-                f"非本机访问 /api/logs 需要配置 {LOG_API_KEY_ENV} 并携带 X-API-Key"
-            ),
+            detail=f"非本机访问 {endpoint} 需要配置 {key_env} 并携带 X-API-Key",
         )
 
 
+def require_logs_access(request: Request) -> None:
+    """`/api/logs` 的访问控制。**不满足时抛 403**。"""
+    _require_access(request, key_env=LOG_API_KEY_ENV, endpoint="/api/logs")
+
+
+def require_eval_trigger_access(request: Request) -> None:
+    """`/api/eval/trigger` 的访问控制。默认关闭之外的第二道门。"""
+    _require_access(
+        request,
+        key_env=EVAL_TRIGGER_API_KEY_ENV,
+        endpoint="/api/eval/trigger",
+    )
+
+
 __all__ = [
+    "EVAL_TRIGGER_API_KEY_ENV",
     "LOG_API_KEY_ENV",
+    "require_eval_trigger_access",
     "require_logs_access",
 ]

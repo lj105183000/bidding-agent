@@ -58,6 +58,9 @@ uv run pytest -k "sse" -v                 # 关键词筛选
 
 python eval/ragas_eval.py                # RAG 质量评测（LLM-as-Judge）
 python eval/agent_eval.py                # Agent 工具选择准确率 + 延迟
+python eval/backfill_db.py --dry-run     # 预览趋势历史回填（不连数据库）
+python eval/backfill_db.py               # 幂等回填 eval_runs（PostgreSQL）
+python eval/run_all.py --suites retrieval_offline --save --save-db  # 趋势 + 数据库
 ```
 
 生产启动（**必须单进程**，限流器/缓存/MCP 子进程均为进程内单例）：
@@ -84,6 +87,8 @@ src/clients/        LLM 客户端：deepseek / zhipu / openai_compatible / visio
 src/database/       Neo4j 知识图谱（6 类查询模板）/ PostgreSQL（6 类查询 + 会话/反馈 CRUD）
 src/datahub/        轻量数据中台 —— 资产目录 registry.py / 静态血缘 lineage.py /
                     只读门面 service.py / 契约 contract.py（P0）；P1 起承载统一数据访问
+src/eval_runs/      轻量评测中台 —— eval_runs/eval_jobs 持久化（db/store/records）、
+                    对比纯函数（compare.py）、读取门面（service.py）、手动触发（jobs.py）
 src/mcp/ + web_search.py   Exa MCP（自研 stdio JSON-RPC 客户端）+ Tavily
 src/config.py       Settings dataclass，__post_init__ 校验必需项，缺失直接退出
 ```
@@ -94,7 +99,8 @@ src/config.py       Settings dataclass，__post_init__ 校验必需项，缺失�
 - **工具永不抛异常**：数据库/图谱/联网工具统一返回 `{"success", "data"/"results", "error"}`，格式化器处理所有失败分支。Agent 绝不因后端宕机崩溃——这是硬性约定。
 - **异常分级**：完整异常（服务地址、原始错误、SQL）**只进日志**；用户可见提示不泄露内部细节。
 - **出站 `trust_env=False`**：所有出站 HTTP 不继承系统代理。这是为了规避"桌面代理软件关闭后连接被路由到失效端口（WinError 10061）"的坑，**不要回退成默认 httpx 客户端**。
-- **数据访问收口**：目录/血缘由 `src/datahub` 静态声明；`analysis / competitor / material` 已迁移到 `src/datahub/pg.py` / `neo4j.py`，新增数据访问不要再写 `psycopg.connect` / `GraphDatabase.driver`。目录端点不连库，三库全挂也应返回 200。
+- **数据访问收口**：目录/血缘由 `src/datahub` 静态声明；`analysis / competitor / material` 已迁移到 `src/datahub/pg.py` / `neo4j.py`，新增数据访问不要再写 `psycopg.connect` / `GraphDatabase.driver`。目录端点不连库，三库全挂也应返回 200。评测历史同样经 `src/datahub/pg.py` 的 `PGCursor` / `PGTransaction` 访问。
+- **评测历史双事实源**：`eval/trend.jsonl` 仍是**门禁事实源**（`--save` / `--gate` 行为不变）；PostgreSQL `eval_runs` / `eval_jobs` 是看板历史源，只由 `--save-db`、`eval/backfill_db.py`、手动触发写入。DB 不可用时 `/api/eval/runs|compare|jobs` 回退趋势文件并标 `storage.backend`；写库失败只告警，**不改变门禁退出码**。手动触发默认关闭（`EVAL_TRIGGER_ENABLED=0`），仅允许 `retrieval_offline`。
 - **调度器独立进程**：`src/datahub/scheduler.py` 不导入 `api.server`、不占 8001；只调度幂等任务（法规增量/质量扫描/目录快照），`ingest`/`pg --force`/`graph --clear` 永远人工执行。
 
 ## 不可破坏的契约（红线）
@@ -109,6 +115,7 @@ src/config.py       Settings dataclass，__post_init__ 校验必需项，缺失�
 | 前端落库 | `PersistedMessage` 形状：`role/content/sources/toolCalled/toolName/image/imageName`；`thinking` 与计时**不落库** |
 | `.env` 键名 | 见 `bidding-agent/docs/开发文档.md` §2.3 全表，新增配置项须同步文档 |
 | 安全 | 数据库查询参数化 + 字段/聚合白名单；LIKE 通配符转义 |
+| 评测历史 | `trend.jsonl` 仍是门禁事实源；`eval_runs/eval_jobs` 仅由 `--save-db`/回填/触发写入；`--save-db` 失败不改退出码；触发默认关闭、仅 `retrieval_offline` |
 | `.env` 与密钥 | **永不入库**；密钥不进日志、不进用户可见错误 |
 
 ## 代码风格约定
@@ -153,6 +160,7 @@ src/config.py       Settings dataclass，__post_init__ 校验必需项，缺失�
 | 新端点/字段/错误码 | `开发文档.md` §5、`README.md` API 表 |
 | 新配置项 | `开发文档.md` §2.3、本文件 |
 | 数据中台资产/端点/重建策略 | 本文件、`开发文档.md` §4.4/§5.5、README |
+| 评测持久化/触发/新配置 | 本文件、`开发文档.md` §2.3/§5.6/§10.2、`组件工作机制.md` §20、README |
 | 包结构/文件移动 | 本文件、`开发文档.md` §1、`组件工作机制.md` 路径引用 |
 
 ## 排障速查

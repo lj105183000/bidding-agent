@@ -26,8 +26,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
-from src.api_access import require_logs_access
+from src.api_access import require_eval_trigger_access, require_logs_access
 from src.config import settings
+from src.eval_runs import jobs as eval_runs_jobs
+from src.eval_runs import service as eval_runs_service
+from src.eval_runs.db import EvalStoreError
 from src.health import build_health, mark_warming_started, mark_warmup_done
 from src.monitoring import build_metrics, render_prometheus, safe_record
 from src.logging_config import (
@@ -893,6 +896,156 @@ def get_online_eval(limit: int = 2000) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.warning("在线评测聚合失败: %s", exc, exc_info=True)
         return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+#: 评测历史端的筛选白名单。未知值直接 400，而不是静默返回空列表——
+#: 前端拼错参数时，“没有数据”和“筛错了”必须能区分。
+_EVAL_SUITES = frozenset({"agent", "retrieval", "retrieval_offline", "rag"})
+_EVAL_VERDICTS = frozenset({"pass", "fail"})
+_EVAL_SOURCES = frozenset({"cli", "api", "backfill", "ci", "trend_file"})
+_EVAL_JOB_STATUSES = frozenset(
+    {"queued", "running", "succeeded", "failed", "lost"}
+)
+
+
+def _require_eval_filter(
+    value: str, allowed: frozenset[str], label: str
+) -> str:
+    if value and value not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"未知的 {label}：{value}；可选：{sorted(allowed)}",
+        )
+    return value
+
+
+@app.get("/api/eval/runs")
+def get_eval_runs(
+    limit: int = Query(20, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    suite: str = "",
+    verdict: str = "",
+    source: str = "",
+) -> dict:
+    """评测运行历史（轻量评测中台）。
+
+    DB 优先；DB 空/不可用时回退 `eval/trend.jsonl`，响应里的
+    `storage.backend` 会如实标注来源。原始异常只进日志。
+    """
+    suite = _require_eval_filter(suite, _EVAL_SUITES, "suite")
+    verdict = _require_eval_filter(verdict, _EVAL_VERDICTS, "verdict")
+    source = _require_eval_filter(source, _EVAL_SOURCES, "source")
+    try:
+        return eval_runs_service.list_runs(
+            limit,
+            offset,
+            suite=suite or None,
+            verdict=verdict or None,
+            source=source or None,
+        )
+    except Exception:  # noqa: BLE001 - 用户可见错误不泄露内部细节
+        logger.exception("评测运行列表读取失败")
+        raise HTTPException(status_code=500, detail="评测历史读取失败，请稍后重试")
+
+
+@app.get("/api/eval/runs/{run_id}")
+def get_eval_run(run_id: str) -> dict:
+    """单次评测运行的完整指标（聚合级，无逐用例明细）。"""
+    try:
+        payload = eval_runs_service.get_run(run_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("评测运行详情读取失败：run_id=%s", run_id)
+        raise HTTPException(status_code=500, detail="评测历史读取失败，请稍后重试")
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"评测运行不存在：{run_id}")
+    return payload
+
+
+@app.get("/api/eval/compare")
+def get_eval_compare(
+    base: str = "",
+    head: str = "",
+    tolerance: float = Query(0.02, ge=0, le=1),
+) -> dict:
+    """两次运行的指标对比（delta、判定变化、可比性提示）。"""
+    if not base or not head:
+        raise HTTPException(status_code=400, detail="base 与 head 不能为空")
+    try:
+        payload = eval_runs_service.compare_runs(
+            base, head, tolerance=tolerance
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("评测运行对比失败：base=%s head=%s", base, head)
+        raise HTTPException(status_code=500, detail="评测对比失败，请稍后重试")
+    if payload is None:
+        raise HTTPException(
+            status_code=404, detail="base 或 head 运行不存在，无法对比"
+        )
+    return payload
+
+
+class EvalTriggerRequest(BaseModel):
+    """手动触发参数。默认只跑离线检索线（确定性、无外部依赖）。"""
+
+    suites: list[str] = Field(default_factory=lambda: ["retrieval_offline"])
+    limit: int = Field(0, ge=0, le=200)
+    note: str = Field("", max_length=200)
+
+
+@app.post(
+    "/api/eval/trigger",
+    status_code=202,
+    dependencies=[Depends(require_eval_trigger_access)],
+)
+def trigger_eval(request: EvalTriggerRequest) -> dict:
+    """启动一次评测任务（默认关闭，仅 retrieval_offline）。
+
+    返回 202 与任务快照；后续用 `/api/eval/jobs/{job_id}` 轮询。
+    任务在子进程中运行，不阻塞本请求。
+    """
+    try:
+        job = eval_runs_jobs.trigger_job(
+            request.suites, limit=request.limit, note=request.note
+        )
+    except eval_runs_jobs.EvalTriggerError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+    except Exception:  # noqa: BLE001 - 用户可见错误不泄露内部细节
+        logger.exception("触发评测任务失败")
+        raise HTTPException(status_code=500, detail="触发评测失败，请稍后重试")
+    return {"job": job, "storage": eval_runs_service.db_storage()}
+
+
+@app.get("/api/eval/jobs")
+def get_eval_jobs(
+    limit: int = Query(20, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    status: str = "",
+) -> dict:
+    """评测任务列表。任务状态只存 DB，不可用时返回空列表 + degraded。"""
+    status = _require_eval_filter(status, _EVAL_JOB_STATUSES, "status")
+    try:
+        return eval_runs_service.list_jobs(
+            limit, offset, status=status or None
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("评测任务列表读取失败")
+        raise HTTPException(status_code=500, detail="评测任务读取失败，请稍后重试")
+
+
+@app.get("/api/eval/jobs/{job_id}")
+def get_eval_job(job_id: str) -> dict:
+    """单个任务的状态与产出摘要。"""
+    try:
+        payload = eval_runs_service.get_job(job_id)
+    except EvalStoreError as exc:
+        logger.warning("评测任务详情读取失败：%s", exc)
+        raise HTTPException(status_code=503, detail="评测任务存储不可用")
+    except Exception:  # noqa: BLE001
+        logger.exception("评测任务详情读取失败：job_id=%s", job_id)
+        raise HTTPException(status_code=500, detail="评测任务读取失败，请稍后重试")
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"评测任务不存在：{job_id}")
+    return payload
 
 
 @app.get("/api/cache")

@@ -234,6 +234,9 @@ class TestTierAssignment:
         ("/api/graph/query", "context"),
         ("/api/analysis/overview", "context"),
         ("/api/tender/documents", "context"),
+        ("/api/eval/runs", "context"),
+        ("/api/eval/offline", "context"),
+        ("/api/eval/trigger", "heavy"),
         ("/api/unknown-thing", "context"),
     ])
     def test_tier(self, path, expected):

@@ -52,6 +52,18 @@ DATA_SCHEDULER_ENABLED=1 python main.py scheduler # 常驻调度
 
 `bidding_records` 的批量导入默认拒绝覆盖已有表：先 `python main.py pg --dry-run` 预览列计划，确认后 `python main.py pg --force`（会 DROP 重建，删除运行时抽取写入的行）。
 
+## 评测历史与手动触发
+
+四线评测默认写 `eval/trend.jsonl`（门禁事实源）。要让 `/eval` 看板可查询历史、选择两次运行对比，再加 `--save-db` 写入 PostgreSQL `eval_runs`；已有趋势可幂等回填：
+
+```bash
+python eval/run_all.py --suites retrieval_offline --save --save-db
+python eval/backfill_db.py --dry-run    # 预览，不连库
+python eval/backfill_db.py              # 幂等回填
+```
+
+手动触发默认关闭（`EVAL_TRIGGER_ENABLED=1` 开启），只允许 `retrieval_offline`（不调 LLM/Qdrant），子进程运行、单任务、60 秒冷却、1200 秒超时。agent/retrieval/rag 等昂贵线仍走 GitHub Actions；`python main.py dev` 的 reload 会杀掉后台触发线程，故只保证生产单进程 `uvicorn` 下可靠。
+
 ## 文档地图
 
 
