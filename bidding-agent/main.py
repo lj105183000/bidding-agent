@@ -7,6 +7,7 @@
     python main.py graph    # 构建知识图谱（Neo4j：两份 CSV → 图数据库）
     python main.py pg       # 构建业务数据库（PostgreSQL：xlsx → bidding_records）
     python main.py all      # 依次构建全部三套数据（ingest → graph → pg）
+    python main.py scheduler # 数据中台维护任务（--list / --run-once，独立进程）
 
 设计说明：`graph` / `pg` 以**子进程**方式调用 src/database/ 下的两个导入脚本，
 而不是 import 它们的函数。那两个脚本刻意不复用 Neo4jClient / PostgresClient
@@ -98,16 +99,38 @@ def main() -> None:
         )
     elif command == "all":
         # 一键构建三套数据。任一步失败即停：后续步骤大概率依赖同一批数据，
-        # 继续跑只会刷出更多看不懂的错误
-        code = _ingest(extra_args)
+        # 继续跑只会刷出更多看不懂的错误。
+        #
+        # ★ 为什么 all 必须显式 --force：
+        #   pg 导入会 DROP 重建 bidding_records，而运行时 /api/extract?save=true
+        #   也写同一张表。一键脚本最容易在“只想更新知识库”时被顺手执行，
+        #   所以把破坏性确认放在 all 入口，而不是等子进程里再问。
+        if "--force" not in extra_args:
+            print(
+                "[main] 拒绝执行 all：pg 导入会 DROP 重建 bidding_records，"
+                "可能删除运行时抽取写入的数据。确认后加 --force。"
+            )
+            raise SystemExit(1)
+        # 过滤掉 --force，避免被 _ingest 当成数据文件路径
+        ingest_args = [arg for arg in extra_args if not arg.startswith("--")]
+        code = _ingest(ingest_args)
         if code == 0:
             code = _run_builder("to_neo4j.py", [], "构建知识图谱（Neo4j）")
         if code == 0:
-            code = _run_builder("to_postgresql.py", [], "构建业务数据库（PostgreSQL）")
+            code = _run_builder("to_postgresql.py", ["--force"], "构建业务数据库（PostgreSQL）")
         raise SystemExit(code)
+    elif command == "scheduler":
+        # 独立进程：不导入 api.server、不监听 8001。
+        # 只调度幂等任务；破坏性导入仍需人工执行 `pg --force` / `ingest`。
+        from src.datahub.scheduler import run_scheduler
+
+        raise SystemExit(run_scheduler(extra_args))
     else:
         print(f"未知命令: {command}")
-        print("可用命令: ingest（向量库）, graph（知识图谱）, pg（业务库）, all（全部）, api, dev")
+        print(
+            "可用命令: ingest（向量库）, graph（知识图谱）, pg（业务库，需 --force）, "
+            "all（全部，需 --force）, scheduler（数据维护）, api, dev"
+        )
         raise SystemExit(1)
 
 

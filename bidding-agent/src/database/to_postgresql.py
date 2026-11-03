@@ -299,6 +299,37 @@ def read_config(password_override: str | None) -> dict:
     }
 
 
+def table_exists(config: dict) -> bool:
+    """目标表是否已存在。
+
+    用 `to_regclass` 而不是 `information_schema.tables`：前者按 search_path
+    解析，能正确反映“本脚本接下来 DROP 的到底存不存在”，且一次查询即可。
+    """
+    with psycopg.connect(**config) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass(%s) IS NOT NULL", (TABLE_NAME,))
+            row = cur.fetchone()
+            return bool(row and row[0])
+
+
+def require_force(table_already_exists: bool, force: bool) -> None:
+    """表已存在时要求显式 `--force`，否则拒绝执行。
+
+    为什么把守卫做成纯函数：这是本脚本唯一“会删数据”的决定，
+    必须能在不连库的单测里验证；把判断混进 `main()` 会让测试被迫连 PostgreSQL。
+
+    `SystemExit(2)` 而不是返回错误码：本脚本的既有风格是“出错立刻大声退出”，
+    且 `main.py` 通过子进程退出码判断成功/失败。
+    """
+    if table_already_exists and not force:
+        logger.error(
+            "拒绝执行：%s 已存在，重建会删除表内已有数据（包括运行时抽取写入的行）。"
+            "确认要整表重建请加 --force；只预览列计划请用 --dry-run。",
+            TABLE_NAME,
+        )
+        raise SystemExit(2)
+
+
 def pick_xlsx(initial_dir: Path) -> Path | None:
     """弹窗选一个 xlsx；用户取消或环境不支持 GUI 时返回 None。
 
@@ -404,13 +435,26 @@ def import_to_postgres(config: dict, plan: list[tuple[str, str, str]], rows: lis
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="把 XLSX 导入 PostgreSQL 的 bidding_records 表（会先 DROP 再重建）",
+        description=(
+            "把 XLSX 导入 PostgreSQL 的 bidding_records 表。"
+            "表已存在时默认拒绝执行，需显式 --force（会 DROP 重建）。"
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("xlsx", nargs="?", help=f"xlsx 路径；省略则用 {DEFAULT_XLSX.name}，文件不存在时弹窗选择")
     # nargs="?" + const=""：`--password` 单独出现时提示输入，避免明文密码进 shell 历史与进程列表
     parser.add_argument("--password", nargs="?", const="", help="覆盖 .env 的密码；不带值则交互式输入（不回显）")
     parser.add_argument("--sheet", help="指定 sheet 名；默认自动选行数最多的那张")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="确认整表 DROP 重建。表已存在时必须显式指定；会删除运行时抽取写入的数据",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只读 xlsx 并打印列计划/行数，不连接数据库、不写入",
+    )
     args = parser.parse_args()
 
     _setup_console()
@@ -425,6 +469,22 @@ def main() -> int:
         path = picked
     logger.info("数据源：%s", path)
 
+    # ★ 先读文件、算列计划，再决定是否连库：
+    #   `--dry-run` 的契约是“不连接数据库”，因此不能把 read_config / 密码输入放在前面。
+    df = read_xlsx(path, args.sheet)
+    plan = build_column_plan(df)
+    logger.info("读到 %d 行 × %d 列，列映射如下：", len(df), len(plan))
+    for original, target, pg_type in plan:
+        logger.info("  %-8s -> %-18s %s", original, target, pg_type)
+
+    rows = build_rows(df, plan)
+    if args.dry_run:
+        logger.info(
+            "dry-run：目标表 %s，计划写入 %d 行 × %d 列；未连接数据库",
+            TABLE_NAME, len(rows), len(plan),
+        )
+        return 0
+
     password_override = args.password
     if password_override == "":  # 裸 --password
         password_override = getpass.getpass("PostgreSQL 密码（不回显）：")
@@ -433,13 +493,14 @@ def main() -> int:
             return 1
     config = read_config(password_override)
 
-    df = read_xlsx(path, args.sheet)
-    plan = build_column_plan(df)
-    logger.info("读到 %d 行 × %d 列，列映射如下：", len(df), len(plan))
-    for original, target, pg_type in plan:
-        logger.info("  %-8s -> %-18s %s", original, target, pg_type)
+    try:
+        exists = table_exists(config)
+    except psycopg.Error as exc:
+        logger.exception("检查目标表是否存在失败：%s", type(exc).__name__)
+        logger.error("无法连接 PostgreSQL，请检查 POSTGRES_* 配置与数据库是否启动；详见上面的日志")
+        return 1
+    require_force(exists, args.force)
 
-    rows = build_rows(df, plan)
     # 只打印"连到哪个库的哪台机"，绝不打密码
     logger.info(
         "目标库：postgresql://%s@%s:%s/%s（表 %s 将被 DROP 重建）",

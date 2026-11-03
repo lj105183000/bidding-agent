@@ -58,7 +58,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 import threading
 import unicodedata
@@ -66,10 +65,8 @@ import difflib
 from collections import Counter
 from typing import Any
 
-import psycopg
-from dotenv import load_dotenv
-
-from src.config import PROJECT_ROOT
+from src.datahub.contract import DataHubConfigError as _DataHubConfigError
+from src.datahub.pg import PGCursor, dsn as pg_dsn
 from src.logging_config import get_logger
 from src.services.analysis import suspicious_sql
 
@@ -279,41 +276,16 @@ def _strip_quantity_suffix(name: str) -> str:
 
 
 def _dsn() -> dict[str, Any]:
-    load_dotenv(PROJECT_ROOT / ".env")
-    host = (os.getenv("POSTGRES_HOST") or "").strip()
-    if not host:
-        raise MaterialError("未配置 PostgreSQL（POSTGRES_HOST 为空）")
-    return {
-        "host": host,
-        "port": (os.getenv("POSTGRES_PORT") or "5432").strip(),
-        "user": (os.getenv("POSTGRES_USER") or "postgres").strip(),
-        # 密码末尾可能带 \r（Windows 编辑器保存 .env 时常见），必须清掉
-        "password": (os.getenv("POSTGRES_PASSWORD") or "").rstrip("\r\n"),
-        "dbname": (os.getenv("POSTGRES_DB") or "chatbot").strip(),
-    }
+    """兼容包装：DSN 组装已收口到 `src.datahub.pg`。"""
+    try:
+        return pg_dsn()
+    except _DataHubConfigError as exc:
+        raise MaterialError(str(exc)) from exc
 
 
-class _Cursor:
-    """轻量上下文管理器：连库 → 用 → 必关。
-
-    注意 `__enter__` 里面若 `psycopg.connect` 成功但中途抛异常，
-    `__exit__` 仍会被调用，故连接不会泄漏（`__exit__` 用 getattr 兜底）。
-    """
-
-    def __enter__(self):
-        try:
-            self._conn = psycopg.connect(**_dsn())
-        except Exception as exc:
-            raise MaterialError(f"数据库连接失败：{type(exc).__name__}") from exc
-        self._cur = self._conn.cursor()
-        return self._cur
-
-    def __exit__(self, *exc_info):
-        try:
-            self._conn.close()
-        except Exception:  # pragma: no cover
-            pass
-        return False
+def _Cursor():
+    """兼容包装：连接/超时/异常映射统一由 `src.datahub.pg.PGCursor` 负责。"""
+    return PGCursor(MaterialError)
 
 
 def _fetchall(cur, sql: str, params: tuple = ()) -> list[tuple]:

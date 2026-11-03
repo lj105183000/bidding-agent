@@ -25,6 +25,9 @@ dependencies = [
     # 数据处理
     "pandas>=3.0.5",
     "openpyxl>=3.1.5",
+    # 数据中台轻量调度（独立进程 `python main.py scheduler`）。
+    # 3.11.x 支持 Python 3.12；4.x 仍是 alpha，不用。
+    "apscheduler>=3.11.3,<4.0",
     # 通用
     "httpx>=0.28.1",
     "python-dotenv>=1.2.2",

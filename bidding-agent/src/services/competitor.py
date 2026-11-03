@@ -49,10 +49,9 @@ import math
 import os
 from typing import Any, Iterable
 
-import psycopg
-from dotenv import load_dotenv
-
-from src.config import PROJECT_ROOT
+from src.datahub.contract import DataHubConfigError as _DataHubConfigError
+from src.datahub.neo4j import get_driver as neo4j_get_driver
+from src.datahub.pg import PGCursor, dsn as pg_dsn
 from src.logging_config import get_logger
 from src.services.analysis import MAX_LIMIT, suspicious_sql
 
@@ -171,84 +170,44 @@ class GraphUnavailableError(CompetitorError):
 
 
 def _dsn() -> dict[str, Any]:
-    """从 .env 组装 PostgreSQL 连接参数（**密码绝不硬编码**）。
+    """兼容包装：DSN 组装已收口到 `src.datahub.pg`。
 
-    与 analysis.py 同一实现，含一个来自实测的细节：Windows 上用手写/编辑器
-    保存的 .env，密码行尾常带 `\\r`，不 rstrip 掉就会报"密码验证失败"。
+    保留函数名是因为既有测试直接调用 `C._dsn()`；`.env` 读取与密码清洗
+    在 DataHub 适配器里，避免三个服务各维护一份。
     """
-    load_dotenv(PROJECT_ROOT / ".env")
-    host = (os.getenv("POSTGRES_HOST") or "").strip()
-    if not host:
-        raise CompetitorError("未配置 PostgreSQL（POSTGRES_HOST 为空）")
-    return {
-        "host": host,
-        "port": (os.getenv("POSTGRES_PORT") or "5432").strip(),
-        "user": (os.getenv("POSTGRES_USER") or "postgres").strip(),
-        # 密码末尾可能带 \r（Windows 编辑器保存 .env 时常见），必须清掉
-        "password": (os.getenv("POSTGRES_PASSWORD") or "").rstrip("\r\n"),
-        "dbname": (os.getenv("POSTGRES_DB") or "chatbot").strip(),
-    }
+    try:
+        return pg_dsn()
+    except _DataHubConfigError as exc:
+        raise CompetitorError(str(exc)) from exc
 
 
-class _Cursor:
-    """轻量上下文管理器：连库 → 用 → 必关（与 analysis.py 同款）。
-
-    为什么不用 psycopg 的 `with psycopg.connect() as conn`：那个写法管的是
-    **事务**（正常退出提交、异常回滚），连接本身在退出时并不关闭。本服务是
-    长跑的 Web 后端，查询又全是只读，连接必须显式 close 才不会把连接数耗光。
-    """
-
-    def __enter__(self):
-        try:
-            self._conn = psycopg.connect(**_dsn())
-        except Exception as exc:
-            raise CompetitorError(f"数据库连接失败：{type(exc).__name__}") from exc
-        self._cur = self._conn.cursor()
-        return self._cur
-
-    def __exit__(self, *exc_info):
-        try:
-            self._conn.close()
-        except Exception:  # pragma: no cover
-            pass
-        return False
+def _Cursor():
+    """兼容包装：连接/超时/异常映射统一由 `src.datahub.pg.PGCursor` 负责。"""
+    return PGCursor(CompetitorError)
 
 
 def _neo4j_driver():
-    """构造 Neo4j driver；配置缺失或初始化失败一律抛 GraphUnavailableError。
+    """兼容包装：driver 的共享/懒加载/超时由 `src.datahub.neo4j` 负责。
 
-    driver 本身完全不发网络包（只准备配置与连接池），所以这里失败只可能是
-    "配置缺失"或"URI 协议写错"，不会是"服务没起来"——后者在查询时才暴露。
+    仍然抛 `GraphUnavailableError`（而不是 DataHubConfigError），
+    因为调用方按“图谱可降级”捕获它。
     """
-    load_dotenv(PROJECT_ROOT / ".env")
-    uri = (os.getenv("NEO4J_URI") or "").strip()
-    user = (os.getenv("NEO4J_USERNAME") or "").strip()
-    # 同 _dsn：密码只去行尾换行，首位空格可能是密码本身
-    password = (os.getenv("NEO4J_PASSWORD") or "").rstrip("\r\n")
-    missing = [
-        name
-        for name, value in (
-            ("NEO4J_URI", uri),
-            ("NEO4J_USERNAME", user),
-            ("NEO4J_PASSWORD", password),
-        )
-        if not value
-    ]
-    if missing:
-        raise GraphUnavailableError(f"未配置知识图谱（缺少 {'、'.join(missing)}）")
     try:
-        from neo4j import GraphDatabase
-
-        return GraphDatabase.driver(uri, auth=(user, password))
+        return neo4j_get_driver()
+    except _DataHubConfigError as exc:
+        raise GraphUnavailableError(str(exc)) from exc
     except Exception as exc:
-        raise GraphUnavailableError(f"知识图谱驱动初始化失败：{type(exc).__name__}") from exc
+        raise GraphUnavailableError(
+            f"知识图谱驱动初始化失败：{type(exc).__name__}"
+        ) from exc
 
 
 class _GraphSession:
-    """Neo4j 只读会话的上下文管理器：开 driver → 开会话 → **两层都关**。
+    """Neo4j 只读会话的上下文管理器。
 
-    与 `_Cursor` 同样是显式类而非 @contextmanager 生成器：退出路径看得见，
-    且每个 close 各自 try，关闭时的异常不会盖掉真正的业务异常。
+    ★ 只关 session，**不关 driver**：driver 现在由 `src.datahub.neo4j` 提供并共享。
+    旧实现每次查询都新建/关闭 driver，连接池反复重建；共享后这一层只负责
+    选库与关闭会话。关闭异常仍各自 try，避免盖掉真正的业务异常。
     """
 
     def __enter__(self):
@@ -259,22 +218,14 @@ class _GraphSession:
         try:
             self._session = self._driver.session(database=database)
         except Exception as exc:
-            self._close_driver()
             raise GraphUnavailableError(f"知识图谱会话创建失败：{type(exc).__name__}") from exc
         return self._session
-
-    def _close_driver(self):
-        try:
-            self._driver.close()
-        except Exception:  # pragma: no cover
-            pass
 
     def __exit__(self, *exc_info):
         try:
             self._session.close()
         except Exception:  # pragma: no cover
             pass
-        self._close_driver()
         return False
 
 

@@ -28,6 +28,30 @@ python main.py api
 cd ../frontend && npm install && npm run dev
 ```
 
+## 数据中台（只读）
+
+后端内置轻量数据中台：资产目录 + 静态血缘，目录端点**不连接数据库**，三库全挂也能返回。
+
+```bash
+python main.py api
+curl http://127.0.0.1:8001/api/data/catalog
+curl http://127.0.0.1:8001/api/data/catalog/pg.bidding_records
+curl "http://127.0.0.1:8001/api/data/lineage?asset=pg.bidding_records&depth=2"
+curl http://127.0.0.1:8001/api/data/quality/latest
+```
+
+质量扫描可手工跑（只打印 JSON，不落库）：`python -m src.datahub.quality`。
+
+轻量调度（独立进程，只跑幂等任务）：
+
+```bash
+python main.py scheduler --list                  # 任务清单，不连后端
+python main.py scheduler --run-once quality      # 手工跑一次质量扫描并落库
+DATA_SCHEDULER_ENABLED=1 python main.py scheduler # 常驻调度
+```
+
+`bidding_records` 的批量导入默认拒绝覆盖已有表：先 `python main.py pg --dry-run` 预览列计划，确认后 `python main.py pg --force`（会 DROP 重建，删除运行时抽取写入的行）。
+
 ## 文档地图
 
 
@@ -66,6 +90,8 @@ cd ../frontend && npm install && npm run dev
 │   ├── tools/               # 工具定义与执行（base/rag\_tools）
 
 │   ├── database/            # Neo4j / PostgreSQL 客户端与导入
+
+│   ├── datahub/             # 轻量数据中台：资产目录 / 静态血缘 / 只读门面
 
 │   ├── mcp/                 # Exa MCP 客户端
 

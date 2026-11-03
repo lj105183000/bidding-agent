@@ -79,12 +79,19 @@ uv run uvicorn api.server:app --host 0.0.0.0 --port 8001
 | `python main.py ingest` | 知识库导入：Excel 问/答 → Qdrant（全量重建） |
 | `python main.py api` | 启动后端 :8001（开发带 reload） |
 | `python main.py dev` | 后台起后端 + 打印前端启动提示 |
+| `python main.py pg --dry-run` / `--force` | 预览 / 执行 PostgreSQL 导入；表已存在时无 `--force` 拒绝执行 |
+| `python main.py scheduler --list` | 数据中台任务清单（不连后端） |
+| `DATA_SCHEDULER_ENABLED=1 python main.py scheduler` | 常驻调度（独立进程，只跑幂等任务） |
 | `uv run pytest -q` | 全量后端测试（在 `bidding-agent/` 下执行） |
 | `npm run dev` / `npm run build` | 前端开发 / 构建（在 `frontend/` 下执行） |
 | `python eval/run_all.py --suites agent --gate --fail-on agent` | 统一评测（四线）与回归门禁 |
 | `python eval/ragas_eval.py` | RAG 质量评测（LLM-as-Judge） |
 | `python eval/agent_eval.py` | Agent 工具选择准确率 + 延迟 + token/成本 |
 | `python eval/load_eval.py --mode ask --concurrency 1,5,20 --requests 50` | HTTP 并发压测（ask 冒烟 / chat 正式） |
+
+## 数据中台（只读）
+
+`GET /api/data/catalog`、`GET /api/data/catalog/{asset}`、`GET /api/data/lineage` 提供资产目录与静态血缘，`GET /api/data/quality/latest` 返回最近一份数据质量报告。目录来自 `bidding-agent/src/datahub/registry.py`，**不连接数据库**，三库全挂也能返回；质量扫描可手工跑 `python -m src.datahub.quality`。
 
 ## 仓库结构
 
@@ -109,6 +116,7 @@ uv run uvicorn api.server:app --host 0.0.0.0 --port 8001
 │   │   ├── services/                # 业务服务（合规检查 / 资格审查 / 法规库 / 比价 / 提取）
 │   │   ├── skills/                  # 技能（按 triggers 匹配，5 个）
 │   │   ├── database/                # Neo4j / PostgreSQL 客户端
+│   │   ├── datahub/                 # 轻量数据中台（资产目录 / 静态血缘 / 只读门面）
 │   │   ├── eval_online/             # 在线评测：信号采集与聚合
 │   │   ├── eval_offline/            # 离线评测快照（供 /api/eval/offline）
 │   │   ├── mcp/                     # Exa MCP 客户端

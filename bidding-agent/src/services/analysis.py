@@ -34,58 +34,24 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
-import psycopg
-from dotenv import load_dotenv
-
-from src.config import PROJECT_ROOT
+from src.datahub.checks import (
+    HUGE_AMOUNT,
+    HUGE_OK_CATEGORY_KEYWORDS,
+    NON_HUGE_CATEGORY_KEYWORDS,
+    RELATIVE_OUTLIER_FACTOR,
+    empty_rates,
+    suspicious_rows,
+    suspicious_sql as _checks_suspicious_sql,
+)
+from src.datahub.contract import DataHubConfigError as _DataHubConfigError
+from src.datahub.pg import PGCursor, dsn as pg_dsn
 from src.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 TABLE = "bidding_records"
-
-# 巨额下限（元）。用于"按品类判断是否合理"的规则：
-# 单笔 ≥ 此值的记录，只有工程/基建这类品类才可能是真的。
-HUGE_AMOUNT = 100_000_000  # 1 亿
-
-# 天然不支持巨额单笔的品类关键词：命中即判可疑。
-#
-# ★ 这条规则的由来（踩过的坑）
-# ---------------------------
-# 第一版只用绝对阈值 `amount >= 10亿` 判可疑，结果是**一条都没匹配上**——
-# 因为数据集的最大值才 6.6 亿，阈值比最大值还大，规则等于从不生效。
-# 实测那条脏数据是 `智力、精神和重度残肢体疾人托养服务` = 6.6 亿，
-# 而托养服务不可能到这个量级（应为 660 万，"万元"当"元"录入的典型错误）。
-#
-# 但**不能简单地"服务类不能超 1 亿"**：同一批数据里
-# `水体综合治理及管网提升工程` 4.86 亿（安徽省城建设计研究总院）是真的。
-# 所以判据必须是"品类 + 金额"的组合，而不是单看金额。
-NON_HUGE_CATEGORY_KEYWORDS = (
-    "托养", "养护服务", "残疾", "养老", "食堂", "餐饮", "保洁", "物业",
-    "印刷", "纸张", "办公", "耗材", "书本", "教材", "绿化养护", "安保",
-    "咨询", "培训", "会议", "差旅", "保险", "体检",
-)
-
-# 天然支持巨额单笔的品类关键词：命中则**即使金额很大也判为真实**。
-# 这些是基建/工程类的常见标的，金额上亿属正常。
-HUGE_OK_CATEGORY_KEYWORDS = (
-    "工程", "建设", "施工", "总承包", "EPC", "市政", "道路", "桥梁", "隧道",
-    "管网", "水利", "电力", "铁路", "轨道", "房建", "安置", "产业园",
-    "土地", "复垦", "整治", "改造", "扩建", "景观", "绿化工程",
-)
-
-# 相对离群倍数：**已废弃，保留仅为记录踩过的坑**。
-#
-# 第二版曾用「金额 > P90 × 此倍数」作辅助判据，误伤了 23.68 亿的真实城乡
-# 一体化工程、11.01 亿的产业园项目等一批真实基建记录——因为本数据集的 P90
-# 只有 30.75 万（半数是办公用品），其 500 倍约 1.5 亿，真实工程必然超线。
-#
-# 结论：本数据集"统计离群"≠"数据错误"，相对阈值不可用，改用品类关键词。
-# 详见 suspicious_sql 的文档字符串。
-RELATIVE_OUTLIER_FACTOR = 500
 
 
 class AnalysisError(RuntimeError):
@@ -93,37 +59,23 @@ class AnalysisError(RuntimeError):
 
 
 def _dsn() -> dict[str, Any]:
-    load_dotenv(PROJECT_ROOT / ".env")
-    host = (os.getenv("POSTGRES_HOST") or "").strip()
-    if not host:
-        raise AnalysisError("未配置 PostgreSQL（POSTGRES_HOST 为空）")
-    return {
-        "host": host,
-        "port": (os.getenv("POSTGRES_PORT") or "5432").strip(),
-        "user": (os.getenv("POSTGRES_USER") or "postgres").strip(),
-        # 密码末尾可能带 \r（Windows 编辑器保存 .env 时常见），必须清掉
-        "password": (os.getenv("POSTGRES_PASSWORD") or "").rstrip("\r\n"),
-        "dbname": (os.getenv("POSTGRES_DB") or "chatbot").strip(),
-    }
+    """兼容包装：DSN 组装已收口到 `src.datahub.pg`。
+
+    保留这个函数名是因为既有测试直接调用 `A._dsn()`；实现只有一行，
+    真正的 `.env` 读取与密码清洗在 DataHub 适配器里。
+    """
+    try:
+        return pg_dsn()
+    except _DataHubConfigError as exc:
+        raise AnalysisError(str(exc)) from exc
 
 
-class _Cursor:
-    """轻量上下文管理器：连库 → 用 → 必关。"""
+def _Cursor():
+    """兼容包装：连接、超时与异常映射统一由 `src.datahub.pg.PGCursor` 负责。
 
-    def __enter__(self):
-        try:
-            self._conn = psycopg.connect(**_dsn())
-        except Exception as exc:
-            raise AnalysisError(f"数据库连接失败：{type(exc).__name__}") from exc
-        self._cur = self._conn.cursor()
-        return self._cur
-
-    def __exit__(self, *exc_info):
-        try:
-            self._conn.close()
-        except Exception:  # pragma: no cover
-            pass
-        return False
+    仍然返回上下文管理器（`with _Cursor() as cur`），故调用方无需改动。
+    """
+    return PGCursor(AnalysisError)
 
 
 def _clamp_limit(limit: int) -> int:
@@ -140,48 +92,12 @@ MAX_LIMIT = 200
 
 
 def suspicious_sql(col: str = "amount", subject_col: str = "subject_matter") -> str:
-    """生成"该记录金额可疑"的 SQL 条件（供统计排除与明细查询共用）。
+    """兼容包装：判据的唯一事实来源在 `src.datahub.checks.suspicious_sql`。
 
-    两条规则取**并集**（命中任一即可疑）：
-
-        ① 品类规则：金额 ≥ 1 亿，且标的物命中"天然不支持巨额"的品类关键词
-                     （托养/办公/保洁…）。命中"支持巨额"关键词（工程/建设…）时豁免。
-        ② 兜底规则：金额 ≥ 100 亿（无论如何都不可能是单笔采购）
-
-    ★ 为什么删掉了"相对统计离群"规则
-    ---------------------------------
-    第二版用过「金额 > P90 × 500」作辅助规则，结果**误伤大量真实工程**：
-
-        id=245   23.68亿  城乡一体化发展项目   （安徽建工三建，真实）
-        id=942   11.01亿  工业产业园项目       （中建四局，真实）
-        id=8045   4.86亿  水体综合治理及管网工程（真实）
-
-    原因是本数据集的 P90 只有 30.75 万——半数记录是办公用品（16.1% 甚至
-    低于 1000 元），其 500 倍仅约 1.5 亿，**数亿的真实工程必然超线**。
-
-    根本教训：**本数据集的"统计离群"与"数据错误"不是一回事**。
-    数据类型天然混合（几千元的耗材 ↔ 数亿元的基建），任何相对阈值都会
-    把"大额但真实"和"大额且错误"一起圈进去。而品类关键词是**语义判断**，
-    能区分"托养服务 6.6 亿（错）"与"治水工程 4.86 亿（对）"，且规则可审计、
-    可解释、用户能自行判断是否认同。
-
-    **宁可漏判也不误伤**：漏掉一条脏数据只是让均值偏高（而均值本就不被推荐
-    使用），误伤真实工程却会把重要项目从分析里删掉。
+    保留这个公开函数是因为 `competitor` / `material` 与既有测试都从这里导入；
+    判据的踩坑历史与详细说明已随实现迁到 `checks.py`。
     """
-    ok_kw = " OR ".join(
-        f"COALESCE({subject_col}, '') ILIKE '%%{k}%%'" for k in HUGE_OK_CATEGORY_KEYWORDS
-    )
-    bad_kw = " OR ".join(
-        f"COALESCE({subject_col}, '') ILIKE '%%{k}%%'" for k in NON_HUGE_CATEGORY_KEYWORDS
-    )
-    return (
-        f"("
-        # ② 兜底：绝对巨额
-        f"  {col} >= 10000000000"
-        # ① 品类规则：巨额 + 不该巨额的品类 - 该巨额的品类
-        f"  OR ({col} >= {HUGE_AMOUNT} AND ({bad_kw}) AND NOT ({ok_kw}))"
-        f")"
-    )
+    return _checks_suspicious_sql(col, subject_col)
 
 
 def _amount_filter(exclude_suspicious: bool, alias: str = "") -> str:
@@ -598,46 +514,11 @@ def data_quality() -> dict[str, Any]:
     用户会拿分析结论当真。
     """
     with _Cursor() as cur:
-        cur.execute(f"SELECT count(*) FROM {TABLE}")
-        total = cur.fetchone()[0]
-
-        cur.execute(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_name = %s ORDER BY ordinal_position",
-            (TABLE,),
-        )
-        cols = [r[0] for r in cur.fetchall()]
-
-        empties: list[dict[str, Any]] = []
-        for col in cols:
-            cur.execute(
-                f"SELECT count(*) FROM {TABLE} WHERE {col} IS NULL OR {col}::text = ''"
-            )
-            n = cur.fetchone()[0]
-            if n:
-                empties.append(
-                    {
-                        "column": col,
-                        "empty_count": n,
-                        "empty_percent": round(n / total * 100, 2) if total else 0.0,
-                    }
-                )
-        empties.sort(key=lambda x: x["empty_percent"], reverse=True)
-
-        cur.execute(
-            f"""
-            SELECT id, subject_matter, purchaser, supplier, amount, bid_time, category
-            FROM {TABLE} WHERE {suspicious_sql()}
-            ORDER BY amount DESC LIMIT 30
-            """
-        )
-        rows = cur.fetchall()
-
-        # 可疑记录的**真值**计数（不受上面 LIMIT 30 影响）。
-        # 单列一次 count 是为了与 overview() 的口径一致——两个接口的数字
-        # 会出现在同一个页面上，对不上就是 bug。
-        cur.execute(f"SELECT count(*) FROM {TABLE} WHERE {suspicious_sql()}")
-        suspicious_total = cur.fetchone()[0]
+        # 空值率与可疑明细的口径在 `datahub.checks` 里，质量扫描复用同一份实现。
+        total, empties = empty_rates(cur, TABLE)
+        # `suspicious_rows` 同时返回明细与**真值**计数（不受 LIMIT 30 影响）：
+        # 两个数字会出现在同一页面（总览提示条 + 质量面板），口径必须一致。
+        rows, suspicious_total = suspicious_rows(cur, TABLE, limit=30)
 
         # P90 用于说明相对规则
         cur.execute(
