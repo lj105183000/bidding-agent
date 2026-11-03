@@ -125,6 +125,15 @@ def _read_jsonl(path: pathlib.Path) -> list[dict]:
     return out
 
 
+def read_trend_records() -> list[dict]:
+    """公开的趋势文件读取入口（供评测中台的 DB 回退路径复用）。
+
+    `_read_jsonl` 已经处理了“文件不存在 / 坏行跳过”，回退路径不应再写
+    一份解析逻辑——两份实现迟早会在坏行语义上分叉。
+    """
+    return _read_jsonl(TREND)
+
+
 def _read_json(path: pathlib.Path) -> dict | None:
     if not path.exists():
         return None

@@ -10,6 +10,7 @@
  * ------------------
  *   离线：`/api/eval/offline` 读 `eval/` 下的落盘产物
  *   在线：`/api/eval/online`  读真实请求采样的聚合
+ *   历史：`/api/eval/runs|compare|jobs` 读 PostgreSQL（DB 不可用时后端回退趋势文件）
  *
  * **逐用例表格做不出来**：后端 `EvalReport` 只保存聚合后的 `MetricResult`，
  * 逐用例结果在 `run_all.py` 内部用完即弃。故页面**显式说明**这一点，
@@ -28,37 +29,30 @@ import {
   Activity,
   AlertTriangle,
   BarChart3,
-  CheckCircle2,
   Info,
   Loader2,
   RefreshCw,
-  XCircle,
 } from 'lucide-react'
 
+import { EvalRunsPanel } from '../components/EvalRunsPanel'
+import { Section } from '../components/EvalSection'
 import { ProgressBar } from '../components/MicroBars'
 import {
   formatValue,
   GRID_COLOR,
-  LOW_COLOR,
-  RELEVANCE_NEUTRAL_COLOR,
   sourceColor,
   TICK_FAINT_COLOR,
-  WARN_COLOR,
 } from '../lib/chartStyles'
+import { statusStyle } from '../lib/evalFormat'
 import {
   fetchOfflineEval,
   fetchOnlineEval,
+  fetchEvalRuns,
+  type EvalRunsResponse,
   type OfflineEvalSnapshot,
   type OfflineMetric,
   type OnlineEvalSnapshot,
 } from '../lib/evalApi'
-
-/** 指标状态 → 图标与色。后端给的是 `pass` / `fail` / `''`（未知）。 */
-function statusStyle(status: string): { color: string; Icon: typeof CheckCircle2; text: string } {
-  if (status === 'pass') return { color: LOW_COLOR, Icon: CheckCircle2, text: '达标' }
-  if (status === 'fail') return { color: WARN_COLOR, Icon: XCircle, text: '未达标' }
-  return { color: RELEVANCE_NEUTRAL_COLOR, Icon: Activity, text: '无门禁' }
-}
 
 /**
  * 一条指标卡。
@@ -172,47 +166,41 @@ function RateRow({ label, value, hint }: { label: string; value: number | null |
   )
 }
 
-function Section({
-  title,
-  icon,
-  children,
-  right,
-}: {
-  title: string
-  icon?: React.ReactNode
-  children: React.ReactNode
-  right?: React.ReactNode
-}) {
-  return (
-    <section className="rounded-lg border border-slate-200 bg-white p-3">
-      <div className="mb-2 flex items-center gap-2">
-        {icon}
-        <h2 className="text-[13px] font-medium text-ink-700">{title}</h2>
-        {right && <span className="ml-auto text-[11px] text-ink-400">{right}</span>}
-      </div>
-      {children}
-    </section>
-  )
-}
-
 export default function EvalDashboard() {
   const [offline, setOffline] = useState<OfflineEvalSnapshot | null>(null)
   const [online, setOnline] = useState<OnlineEvalSnapshot | null>(null)
+  const [runs, setRuns] = useState<EvalRunsResponse | null>(null)
   const [err, setErr] = useState<string>('')
   const [loading, setLoading] = useState(true)
 
   const load = () => {
     setLoading(true)
     setErr('')
-    // 两个端点互不依赖，**并行取**：串行会白等一倍时间
-    Promise.allSettled([fetchOfflineEval(), fetchOnlineEval()])
-      .then(([o, n]) => {
+    // 三个端点互不依赖，**并行取**：串行会白等一倍时间
+    Promise.allSettled([fetchOfflineEval(), fetchOnlineEval(), fetchEvalRuns()])
+      .then(([o, n, r]) => {
         if (o.status === 'fulfilled') setOffline(o.value)
         else setErr((prev) => `${prev}${prev ? '；' : ''}离线评测：${o.reason}`)
         if (n.status === 'fulfilled') setOnline(n.value)
         else setErr((prev) => `${prev}${prev ? '；' : ''}在线评测：${n.reason}`)
+        if (r.status === 'fulfilled') setRuns(r.value)
+        else setErr((prev) => `${prev}${prev ? '；' : ''}运行历史：${r.reason}`)
       })
       .finally(() => setLoading(false))
+  }
+
+  /** 只刷新运行历史（触发任务终态后由子面板调用）。 */
+  const loadRuns = () => {
+    fetchEvalRuns()
+      .then(setRuns)
+      .catch((error: unknown) =>
+        setErr(
+          (prev) =>
+            `${prev}${prev ? '；' : ''}运行历史：${
+              error instanceof Error ? error.message : String(error)
+            }`,
+        ),
+      )
   }
 
   useEffect(load, [])
@@ -231,10 +219,13 @@ export default function EvalDashboard() {
   // 静默刷新：不置 loading、不清 err —— 否则按钮每 15 秒转一圈、错误提示闪烁。
   useEffect(() => {
     const silent = () => {
-      Promise.allSettled([fetchOfflineEval(), fetchOnlineEval()]).then(([o, n]) => {
-        if (o.status === 'fulfilled') setOffline(o.value)
-        if (n.status === 'fulfilled') setOnline(n.value)
-      })
+      Promise.allSettled([fetchOfflineEval(), fetchOnlineEval(), fetchEvalRuns()]).then(
+        ([o, n, r]) => {
+          if (o.status === 'fulfilled') setOffline(o.value)
+          if (n.status === 'fulfilled') setOnline(n.value)
+          if (r.status === 'fulfilled') setRuns(r.value)
+        },
+      )
     }
     const timer = window.setInterval(silent, 15000)
     const onVisible = () => {
@@ -368,6 +359,9 @@ export default function EvalDashboard() {
           </div>
         )}
       </Section>
+
+      {/* ---------- 运行历史与对比 ---------- */}
+      <EvalRunsPanel runs={runs} loading={loading} onRefreshRuns={loadRuns} />
 
       {/* ---------- 裁判一致性 ---------- */}
       {offline?.capabilities.judge_agreement && (
@@ -535,7 +529,8 @@ export default function EvalDashboard() {
       </Section>
 
       <p className="pb-2 text-[10px] text-ink-300" style={{ color: TICK_FAINT_COLOR }}>
-        <span style={{ color: GRID_COLOR }}>·</span> 数据来自 <code>eval/</code> 落盘产物与真实请求采样
+        <span style={{ color: GRID_COLOR }}>·</span> 数据来自 <code>eval/</code> 落盘产物、PostgreSQL
+        评测历史与真实请求采样
       </p>
     </div>
   )

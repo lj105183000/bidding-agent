@@ -121,3 +121,264 @@ export function fetchOfflineEval(): Promise<OfflineEvalSnapshot> {
 export function fetchOnlineEval(limit = 2000): Promise<OnlineEvalSnapshot> {
   return getJson<OnlineEvalSnapshot>(`/api/eval/online?limit=${limit}`)
 }
+
+/* -------------------------------------------------------------------------
+ * 轻量评测中台：运行历史 / 对比 / 任务
+ *
+ * ★ 为什么追加而不是改写上面的类型
+ * --------------------------
+ * `/api/eval/offline` 是既有看板契约（指标转置 + 裁判一致性）；运行历史是
+ * 另一组端点，形状不同。混在一组类型里会让“改历史接口时误动离线快照”。
+ * ---------------------------------------------------------------------- */
+
+export type EvalStorageBackend = 'db' | 'trend_file' | 'none'
+
+/** 数据来源标记：前端据此如实展示“数字来自数据库还是旧趋势文件”。 */
+export interface EvalStorage {
+  backend: EvalStorageBackend
+  degraded: boolean
+  reason: string
+  db_available: boolean
+  file_available: boolean
+}
+
+export interface EvalTriggerCapability {
+  enabled: boolean
+  suites: string[]
+  reason: string
+}
+
+export interface EvalCapabilities {
+  per_case: boolean
+  per_case_reason?: string
+  compare?: boolean
+  trigger?: EvalTriggerCapability
+}
+
+/** 运行列表里的一条（聚合级，不含逐指标）。 */
+export interface EvalRunSummary {
+  run_id: string
+  created_at: string | null
+  version: string
+  schema_version: number
+  source: string
+  job_id: string | null
+  suites: string[]
+  suites_source: string
+  verdict: string
+  case_counts: Record<string, number>
+  suite_verdicts: Record<string, string>
+  metric_count: number
+}
+
+/** 单个指标的详情。 */
+export interface EvalMetricView {
+  metric: string
+  label: string
+  suite: string
+  value: number | null
+  status: string
+  threshold: number | null
+  unit: string
+  direction: string
+  is_ratio: boolean
+  note: string
+}
+
+export interface EvalRunDetail extends EvalRunSummary {
+  config: Record<string, unknown>
+  suite_notes: Record<string, string>
+  datasets: Record<string, unknown>
+  metrics: EvalMetricView[]
+}
+
+export interface EvalRunResponse {
+  run: EvalRunDetail
+  storage: EvalStorage
+}
+
+export interface EvalRunsResponse {
+  runs: EvalRunSummary[]
+  total: number
+  limit: number
+  offset: number
+  storage: EvalStorage
+  capabilities: EvalCapabilities
+}
+
+export interface EvalCompareValue {
+  value: number | null
+  status: string
+  threshold: number | null
+}
+
+export interface EvalCompareRow {
+  metric: string
+  label: string
+  suite: string
+  unit: string
+  direction: string
+  is_ratio: boolean
+  base: EvalCompareValue
+  head: EvalCompareValue
+  delta: number | null
+  pct_delta: number | null
+  status_changed: boolean
+  status_change: string
+  /** improved / regressed / unchanged / observed / unknown / not_comparable */
+  change: string
+  track_regression: boolean
+  note: string
+}
+
+export interface EvalCompareSide {
+  run_id: string
+  version: string
+  verdict: string
+  created_at: string | null
+  suites: string[]
+  case_counts: Record<string, number>
+}
+
+export interface EvalConfigDiffRow {
+  key: string
+  base: unknown
+  head: unknown
+}
+
+export interface EvalCompareResponse {
+  base: EvalCompareSide
+  head: EvalCompareSide
+  comparable: boolean
+  caveats: string[]
+  metrics: EvalCompareRow[]
+  suite_verdicts: {
+    base: Record<string, string>
+    head: Record<string, string>
+    changed: Record<string, { base: string | null; head: string | null }>
+  }
+  config_diff: EvalConfigDiffRow[]
+  dataset_diff: EvalConfigDiffRow[]
+  new_metrics: string[]
+  missing_metrics: string[]
+  tolerance: number
+  storage: { base: EvalStorage; head: EvalStorage }
+}
+
+export interface EvalJob {
+  job_id: string
+  status: string
+  suites: string[]
+  note: string
+  requested_at: string | null
+  started_at: string | null
+  finished_at: string | null
+  run_id: string | null
+  exit_code: number | null
+  error: string | null
+  log_path: string
+}
+
+export interface EvalJobsResponse {
+  jobs: EvalJob[]
+  total: number
+  limit: number
+  offset: number
+  storage: EvalStorage
+  capabilities: EvalCapabilities
+}
+
+export interface EvalTriggerRequest {
+  suites: string[]
+  limit?: number
+  note?: string
+}
+
+export interface EvalTriggerResponse {
+  job: EvalJob
+  storage: EvalStorage
+}
+
+export interface EvalJobResponse {
+  job: EvalJob
+  storage: EvalStorage
+  capabilities: EvalCapabilities
+  /** 任务产出的运行摘要（若已写入 eval_runs）。 */
+  run?: EvalRunSummary
+}
+
+function queryString(params: Record<string, string | number | undefined>): string {
+  const search = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== '') search.set(key, String(value))
+  }
+  const text = search.toString()
+  return text ? `?${text}` : ''
+}
+
+async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) {
+    // 触发失败的原因（未开启 / 冷却 / 存储不可用）必须展示给用户，
+    // 否则按钮点了没反应，看起来像前端坏了。
+    let detail = ''
+    try {
+      const payload = (await res.json()) as { detail?: unknown }
+      if (typeof payload.detail === 'string') detail = payload.detail
+    } catch {
+      // 响应不是 JSON：忽略，用状态码兜底
+    }
+    throw new Error(`${path} 返回 HTTP ${res.status}${detail ? `：${detail}` : ''}`)
+  }
+  return (await res.json()) as T
+}
+
+/** 运行历史（DB 优先，后端会自动回退趋势文件）。 */
+export function fetchEvalRuns(
+  params: {
+    limit?: number
+    offset?: number
+    suite?: string
+    verdict?: string
+    source?: string
+  } = {},
+): Promise<EvalRunsResponse> {
+  return getJson<EvalRunsResponse>(`/api/eval/runs${queryString(params)}`)
+}
+
+/** 单次运行详情。 */
+export function fetchEvalRun(runId: string): Promise<EvalRunResponse> {
+  return getJson<EvalRunResponse>(`/api/eval/runs/${encodeURIComponent(runId)}`)
+}
+
+/** 两次运行对比。 */
+export function fetchEvalCompare(
+  base: string,
+  head: string,
+  tolerance = 0.02,
+): Promise<EvalCompareResponse> {
+  return getJson<EvalCompareResponse>(
+    `/api/eval/compare${queryString({ base, head, tolerance })}`,
+  )
+}
+
+/** 评测任务列表。 */
+export function fetchEvalJobs(
+  params: { limit?: number; offset?: number; status?: string } = {},
+): Promise<EvalJobsResponse> {
+  return getJson<EvalJobsResponse>(`/api/eval/jobs${queryString(params)}`)
+}
+
+/** 单个任务状态（轮询用）。 */
+export function fetchEvalJob(jobId: string): Promise<EvalJobResponse> {
+  return getJson<EvalJobResponse>(`/api/eval/jobs/${encodeURIComponent(jobId)}`)
+}
+
+/** 手动触发一次评测（默认关闭；后端只允许 retrieval_offline）。 */
+export function triggerEvalJob(body: EvalTriggerRequest): Promise<EvalTriggerResponse> {
+  return postJson<EvalTriggerResponse>('/api/eval/trigger', body)
+}

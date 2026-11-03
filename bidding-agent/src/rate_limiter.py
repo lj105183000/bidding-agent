@@ -385,6 +385,8 @@ TIER_RULES: tuple[tuple[str, str], ...] = (
     ("/api/report", "heavy"),
     ("/api/compliance/check/upload", "heavy"),
     ("/api/qualification/check/upload", "heavy"),
+    # 会拉起评测子进程，按最贵的一层限流（即使它本身很快）。
+    ("/api/eval/trigger", "heavy"),
 
     # --- llm：走大模型（问答 / 比对 / 合规检查 / 联网搜索）---
     ("/api/chat", "llm"),
@@ -407,6 +409,8 @@ TIER_RULES: tuple[tuple[str, str], ...] = (
     ("/api/web/coverage", "context"),
     ("/api/web/status", "context"),
     ("/api/debug", "context"),
+    # 评测历史是只读、轻量的；触发端点单独走 heavy（见文件顶部本表的分层）。
+    ("/api/eval", "context"),
 )
 
 #: 各层的默认配额 `(每窗口请求数, 窗口秒数)`。
