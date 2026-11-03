@@ -90,6 +90,45 @@ def test_specialist_tools_ok():
     )
 
 
+def test_verification_policy_can_ignore_derived_numbers():
+    """数据题的均值/占比是算出来的，规则核对无法验证；条款号仍必须核对。"""
+    result = {
+        "verification": {
+            "ok": False,
+            "critical_ok": False,
+            "unsupported_laws": [],
+            "unsupported_articles": [],
+            "unsupported_numbers": ["249.9 万元"],
+            "false_unavailable_claims": [],
+            "summary": "数字未经检索结果支持：249.9 万元",
+        }
+    }
+    # 未声明时保持原样（不能影响旧用例）
+    assert RA._apply_verification_policy({}, result) is result
+
+    patched = RA._apply_verification_policy({"verify_numbers": False}, result)
+    assert patched is not result  # 不原地修改，避免污染其它指标
+    assert patched["verification"]["unsupported_numbers"] == []
+    assert patched["verification"]["ok"] is True
+    assert patched["verification"]["critical_ok"] is True
+
+    # 豁免数字后，条款号编造仍然是严重失败
+    result2 = {
+        "verification": {
+            "ok": False,
+            "critical_ok": False,
+            "unsupported_laws": [],
+            "unsupported_articles": ["第三十二条"],
+            "unsupported_numbers": ["10%"],
+            "false_unavailable_claims": [],
+            "summary": "x",
+        }
+    }
+    patched2 = RA._apply_verification_policy({"verify_numbers": False}, result2)
+    assert patched2["verification"]["critical_ok"] is False
+    assert patched2["verification"]["ok"] is False
+
+
 def test_suite_env_forces_modes(monkeypatch):
     monkeypatch.setenv("AGENT_MULTI_AGENT", "auto")
     with RA._suite_env("agent"):

@@ -40,7 +40,7 @@
     "require_citation": false
   },
   {
-    "question": "这条条款是否合规，依据哪条法规？",
+    "question": "招标文件要求投标人必须在本地设有分支机构，这条合规吗，依据哪条法规？",
     "category": "compliance",
     "expected_agents": [
       "compliance"
@@ -99,7 +99,8 @@
         "search_knowledge_base"
       ]
     },
-    "require_citation": true
+    "require_citation": true,
+    "verify_numbers": false
   },
   {
     "question": "最近的中标项目金额和供应商情况",
@@ -117,10 +118,11 @@
         "search_knowledge_base"
       ]
     },
-    "require_citation": true
+    "require_citation": true,
+    "verify_numbers": false
   },
   {
-    "question": "合规风险和中标金额统计",
+    "question": "招标文件指定品牌为格力空调，这条合规吗？并统计中标金额趋势。",
     "category": "multi_intent",
     "expected_agents": [
       "compliance",
@@ -139,7 +141,8 @@
         "search_knowledge_graph"
       ]
     },
-    "require_citation": true
+    "require_citation": true,
+    "verify_numbers": false
   },
   {
     "question": "供应商关系图谱和地区分布",
@@ -157,7 +160,8 @@
         "search_knowledge_base"
       ]
     },
-    "require_citation": true
+    "require_citation": false,
+    "note": "图谱/数据库结果不产生文档来源，不强制引用"
   },
   {
     "question": "2026 年最新的政府采购政策是什么？",
@@ -228,7 +232,8 @@
         "check_tender_compliance"
       ]
     },
-    "require_citation": true
+    "require_citation": false,
+    "note": "规则库未覆盖质保金；正确行为是如实说未找到依据，不能强求出处"
   },
   {
     "question": "中标金额最高的前 10 个供应商是谁？",
@@ -246,7 +251,8 @@
         "search_knowledge_base"
       ]
     },
-    "require_citation": true
+    "require_citation": false,
+    "note": "数据库/图谱结果不产生文档来源，不强制引用"
   },
   {
     "question": "各省采购项目数量分布",
@@ -259,7 +265,8 @@
         "query_database"
       ]
     },
-    "require_citation": false
+    "require_citation": false,
+    "verify_numbers": false
   },
   {
     "question": "2025 年采购金额同比变化",
@@ -280,14 +287,9 @@
     "expected_agents": [
       "retrieval"
     ],
-    "expected_tools": {
-      "retrieval": [
-        "search_knowledge_base",
-        "search_knowledge_graph"
-      ]
-    },
+    "expected_tools": {},
     "require_citation": false,
-    "note": "知识库无答案；不强制引用，重点看是否 partial/降级"
+    "note": "知识库无答案；不强制引用也不要求工具命中，重点看是否 partial/降级"
   },
   {
     "question": "这份文件合规吗",

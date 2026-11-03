@@ -1207,6 +1207,9 @@ class BiddingAgent(ReActMixin, GenerationMixin, ToolDefenseMixin):
                 answer,
                 tool_text="\n".join(meta.get("tool_output_text") or []),
                 succeeded_tools=meta.get("succeeded_tools") or [],
+                # 用户问题里的数字/条款也算依据：合规题常把条款原文放在问题里，
+                # 工具只回"未命中规则"，答案复述 10% 不该被当成编造。
+                question=str(meta.get("question") or ""),
             )
         except Exception:
             # 核对是**增益项**：它失败不该影响回答本身
