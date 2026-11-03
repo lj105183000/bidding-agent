@@ -57,7 +57,14 @@ def build_multi_agent_graph(agent):
         route = state.get("route") or []
         if not route:
             return "legacy"
-        return [Send("run_specialist", {"task": task}) for task in route]
+        # ★ Send 的 payload 会**替换**该分支的 state，而不是与父 state 合并。
+        # 只传 {"task": ...} 会让 question/provider/runtime_meta/trace_recorder
+        # 全部丢失（实测 specialist 拿不到问题与记录器）。
+        base = {key: value for key, value in state.items() if key != "task"}
+        return [
+            Send("run_specialist", {**base, "task": task})
+            for task in route
+        ]
 
     def legacy_node(state: MultiAgentState) -> dict:
         _legacy(state.get("runtime_meta") or {})
@@ -83,6 +90,7 @@ def build_multi_agent_graph(agent):
             provider=str(state.get("provider") or ""),
             web_enabled=bool(state.get("web_enabled")),
             session_id=str(state.get("session_id") or ""),
+            trace_recorder=state.get("trace_recorder"),
         )
         return {"specialist_results": [result]}
 

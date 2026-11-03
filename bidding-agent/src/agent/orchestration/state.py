@@ -29,3 +29,6 @@ class MultiAgentState(TypedDict, total=False):
     orchestration: dict
     errors: Annotated[list[str], operator.add]
     runtime_meta: Any
+    #: 主请求的 LLMTraceRecorder（线程安全）；单独放 state，避免嵌套 dict
+    #: 在 LangGraph 节点间被复制后丢失。
+    trace_recorder: Any

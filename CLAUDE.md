@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 前端 **14 个页面**（Chat、Dashboard、Graph、GraphViz、Extract、TenderDoc、Compare、Qualification、Compliance、Deadline、PriceCompare、Material、Analysis、EvalDashboard）均已接通后端；仅 `frontend/src/data/` 保留静态示例/展示元数据。
 - **CI 是绿的**：`uv run pytest -q`（integration 默认排除）全绿；前端 `npm run build`（tsc 无错）+ `vitest run` 通过。
 - Eval Gate 的 CI 配置（Secrets / Postgres service / LLM_PROVIDER / AGENT_VERIFY_REPAIR / timeout）见 `bidding-agent/docs/开发文档.md` §10.1；本地开启核对修复用 `AGENT_VERIFY_REPAIR=1`。
-- 评测已扩为四线（agent / retrieval / retrieval_offline / rag），统一入口 `python eval/run_all.py`；另有独立 HTTP 压测 `eval/load_eval.py`。离线检索线接 PR 门禁 `.github/workflows/retrieval-offline-gate.yml`。
+- 评测已扩为五线（agent / agent_multi / retrieval / retrieval_offline / rag），统一入口 `python eval/run_all.py`；另有独立 HTTP 压测 `eval/load_eval.py`。离线检索线接 PR 门禁 `.github/workflows/retrieval-offline-gate.yml`。
 - 你的任务如果是"实现某模块"，文档已经把契约、验收标准和文件清单写好了——照做即可，不要另起炉灶。
 
 ## 仓库布局
@@ -111,7 +111,7 @@ src/config.py       Settings dataclass，__post_init__ 校验必需项，缺失�
 - `AGENT_MULTI_AGENT=off|auto|on`，**默认 off**；off 时完全走旧 ReAct，行为不变。`auto` 只对复合/多意图问题走图；`on` 供评测/A-B。依赖缺失自动回落 off。
 - specialist 复用 `react_loop._run_tool_loop`（已从 `_chat_stream_tools` 拆出），**不调用** `_generate_final`；只有 synthesizer 产 token。首 token 前失败/无有效结果自动回退旧 ReAct。
 - 新增 done 字段 `orchestration` / `agent_trace` / `agent_timings`（additive）；多 Agent 下 `tool_name` 仍是 primary specialist 的最后一个成功工具（单字符串）。
-- 评测线 `agent_multi` 与 `eval/test_cases_multi.json` 属于 Phase 1b，尚未落地；当前先用现有 `agent` 线做 flag off 回归。
+- 评测线 `agent_multi` 已落地：`eval/test_cases_multi.json`（20 条）+ 指标注册 + `eval-gate` 接入；`agent` 线强制 off，`agent_multi` 强制 on。首轮只观测，阈值待标定。
 
 ## 不可破坏的契约（红线）
 

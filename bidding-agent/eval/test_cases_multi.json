@@ -1,0 +1,301 @@
+[
+  {
+    "question": "什么是政府采购的单一来源采购方式？",
+    "category": "single_intent",
+    "expected_agents": [
+      "retrieval"
+    ],
+    "expected_tools": {
+      "retrieval": [
+        "search_knowledge_base"
+      ]
+    },
+    "require_citation": true
+  },
+  {
+    "question": "供应商和采购人之间有什么关系？",
+    "category": "single_intent",
+    "expected_agents": [
+      "retrieval"
+    ],
+    "expected_tools": {
+      "retrieval": [
+        "search_knowledge_graph",
+        "search_knowledge_base"
+      ]
+    },
+    "require_citation": true
+  },
+  {
+    "question": "统计采购金额的同比变化",
+    "category": "data",
+    "expected_agents": [
+      "data"
+    ],
+    "expected_tools": {
+      "data": [
+        "query_database"
+      ]
+    },
+    "require_citation": false
+  },
+  {
+    "question": "这条条款是否合规，依据哪条法规？",
+    "category": "compliance",
+    "expected_agents": [
+      "compliance"
+    ],
+    "expected_tools": {
+      "compliance": [
+        "check_tender_compliance"
+      ]
+    },
+    "require_citation": true
+  },
+  {
+    "question": "公开招标和邀请招标有什么区别？",
+    "category": "single_intent",
+    "expected_agents": [
+      "retrieval"
+    ],
+    "expected_tools": {
+      "retrieval": [
+        "search_knowledge_base"
+      ]
+    },
+    "require_citation": true
+  },
+  {
+    "question": "统计中标金额趋势并分析供应商关系",
+    "category": "multi_intent",
+    "expected_agents": [
+      "data",
+      "retrieval"
+    ],
+    "expected_tools": {
+      "data": [
+        "query_database"
+      ],
+      "retrieval": [
+        "search_knowledge_base",
+        "search_knowledge_graph"
+      ]
+    },
+    "require_citation": true
+  },
+  {
+    "question": "分析供应商竞争格局和采购人分布",
+    "category": "multi_intent",
+    "expected_agents": [
+      "data",
+      "retrieval"
+    ],
+    "expected_tools": {
+      "data": [
+        "query_database"
+      ],
+      "retrieval": [
+        "search_knowledge_graph",
+        "search_knowledge_base"
+      ]
+    },
+    "require_citation": true
+  },
+  {
+    "question": "最近的中标项目金额和供应商情况",
+    "category": "multi_intent",
+    "expected_agents": [
+      "data",
+      "retrieval"
+    ],
+    "expected_tools": {
+      "data": [
+        "query_database"
+      ],
+      "retrieval": [
+        "search_knowledge_graph",
+        "search_knowledge_base"
+      ]
+    },
+    "require_citation": true
+  },
+  {
+    "question": "合规风险和中标金额统计",
+    "category": "multi_intent",
+    "expected_agents": [
+      "compliance",
+      "data",
+      "retrieval"
+    ],
+    "expected_tools": {
+      "compliance": [
+        "check_tender_compliance"
+      ],
+      "data": [
+        "query_database"
+      ],
+      "retrieval": [
+        "search_knowledge_base",
+        "search_knowledge_graph"
+      ]
+    },
+    "require_citation": true
+  },
+  {
+    "question": "供应商关系图谱和地区分布",
+    "category": "multi_intent",
+    "expected_agents": [
+      "data",
+      "retrieval"
+    ],
+    "expected_tools": {
+      "data": [
+        "query_database"
+      ],
+      "retrieval": [
+        "search_knowledge_graph",
+        "search_knowledge_base"
+      ]
+    },
+    "require_citation": true
+  },
+  {
+    "question": "2026 年最新的政府采购政策是什么？",
+    "category": "web",
+    "expected_agents": [
+      "web"
+    ],
+    "expected_tools": {
+      "web": [
+        "search_web",
+        "search_web_cn",
+        "search_exa"
+      ]
+    },
+    "requires_web": true,
+    "require_citation": true
+  },
+  {
+    "question": "近期发布的最新招标政策有哪些？",
+    "category": "web",
+    "expected_agents": [
+      "web"
+    ],
+    "expected_tools": {
+      "web": [
+        "search_web",
+        "search_web_cn",
+        "search_exa"
+      ]
+    },
+    "requires_web": true,
+    "require_citation": true
+  },
+  {
+    "question": "招标文件要求投标人注册资金 1 亿元，这条合规吗？",
+    "category": "compliance",
+    "expected_agents": [
+      "compliance"
+    ],
+    "expected_tools": {
+      "compliance": [
+        "check_tender_compliance"
+      ]
+    },
+    "require_citation": true
+  },
+  {
+    "question": "评标办法中规定本地企业加分，是否违规？",
+    "category": "compliance",
+    "expected_agents": [
+      "compliance"
+    ],
+    "expected_tools": {
+      "compliance": [
+        "check_tender_compliance"
+      ]
+    },
+    "require_citation": true
+  },
+  {
+    "question": "合同条款约定质保金 10%，依据哪条法规？",
+    "category": "compliance",
+    "expected_agents": [
+      "compliance"
+    ],
+    "expected_tools": {
+      "compliance": [
+        "check_tender_compliance"
+      ]
+    },
+    "require_citation": true
+  },
+  {
+    "question": "中标金额最高的前 10 个供应商是谁？",
+    "category": "multi_intent",
+    "expected_agents": [
+      "data",
+      "retrieval"
+    ],
+    "expected_tools": {
+      "data": [
+        "query_database"
+      ],
+      "retrieval": [
+        "search_knowledge_graph",
+        "search_knowledge_base"
+      ]
+    },
+    "require_citation": true
+  },
+  {
+    "question": "各省采购项目数量分布",
+    "category": "data",
+    "expected_agents": [
+      "data"
+    ],
+    "expected_tools": {
+      "data": [
+        "query_database"
+      ]
+    },
+    "require_citation": false
+  },
+  {
+    "question": "2025 年采购金额同比变化",
+    "category": "data",
+    "expected_agents": [
+      "data"
+    ],
+    "expected_tools": {
+      "data": [
+        "query_database"
+      ]
+    },
+    "require_citation": false
+  },
+  {
+    "question": "冰岛的首都是哪里？",
+    "category": "failure_fallback",
+    "expected_agents": [
+      "retrieval"
+    ],
+    "expected_tools": {
+      "retrieval": [
+        "search_knowledge_base",
+        "search_knowledge_graph"
+      ]
+    },
+    "require_citation": false,
+    "note": "知识库无答案；不强制引用，重点看是否 partial/降级"
+  },
+  {
+    "question": "这份文件合规吗",
+    "category": "failure_fallback",
+    "expected_agents": [],
+    "expected_tools": {},
+    "expect_fallback": true,
+    "require_citation": false,
+    "note": "过短问题应回落旧 ReAct（沿用 clarify 门控）"
+  }
+]

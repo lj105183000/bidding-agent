@@ -550,6 +550,168 @@ METRIC_SPECS: dict[str, MetricSpec] = {
             "往往是内容被截断或降级了。"
         ),
     ),
+    # ---- 多 Agent 线（Phase 1b）----
+    # 首 5 次只观测路由/专家/引用/降级比例；拿到基线后再启用绝对门槛。
+    # 延迟与核对红线先设门槛，避免"多 Agent 把产品拖慢/编造"被静默放过。
+    "agent_multi.routing_accuracy": MetricSpec(
+        name="agent_multi.routing_accuracy",
+        label="专家路由准确率",
+        direction=Direction.HIGHER_IS_BETTER,
+        threshold=None,
+        unit="ratio",
+        suite="agent_multi",
+        rationale=(
+            "期望专家集合被实际 route 覆盖、且不出现 forbidden_agents；"
+            "fallback 题要求真的降级。目标 ≥0.90，Phase 1b 首 5 次先只观测。"
+        ),
+    ),
+    "agent_multi.specialist_tool_accuracy": MetricSpec(
+        name="agent_multi.specialist_tool_accuracy",
+        label="专家工具命中率",
+        direction=Direction.HIGHER_IS_BETTER,
+        threshold=None,
+        unit="ratio",
+        suite="agent_multi",
+        rationale=(
+            "每个期望 specialist 至少命中一个期望工具（按 tool_timings[].agent/name）。"
+            "目标 ≥0.90；先观测，避免新线首次运行直接打红。"
+        ),
+    ),
+    "agent_multi.synthesis_citation_rate": MetricSpec(
+        name="agent_multi.synthesis_citation_rate",
+        label="综合引用通过率",
+        direction=Direction.HIGHER_IS_BETTER,
+        threshold=None,
+        unit="ratio",
+        suite="agent_multi",
+        rationale=(
+            "verification.ok 且 sources/web_sources 非空；require_citation=false 的题直接计通过。"
+            "目标 ≥0.90；首 5 次只观测。"
+        ),
+    ),
+    "agent_multi.latency_p95": MetricSpec(
+        name="agent_multi.latency_p95",
+        label="多 Agent 延迟 P95",
+        direction=Direction.LOWER_IS_BETTER,
+        threshold=60000.0,
+        unit="ms",
+        suite="agent_multi",
+        track_regression=False,
+        rationale=(
+            "保延迟是 Phase 1 的硬约束：专家并行 + 2 轮上限 + 综合生成，"
+            "P95 不应超过旧 Agent 线的 60s 产品上限。"
+        ),
+    ),
+    "agent_multi.partial_rate": MetricSpec(
+        name="agent_multi.partial_rate",
+        label="专家部分失败比例",
+        direction=Direction.LOWER_IS_BETTER,
+        threshold=None,
+        unit="ratio",
+        suite="agent_multi",
+        rationale="专家超时/非 ok 或 orchestration.partial 的题占比；目标 ≤0.10。",
+    ),
+    "agent_multi.fallback_rate": MetricSpec(
+        name="agent_multi.fallback_rate",
+        label="回退旧路径比例",
+        direction=Direction.LOWER_IS_BETTER,
+        threshold=None,
+        unit="ratio",
+        suite="agent_multi",
+        rationale=(
+            "orchestration 缺失或 fallback!=none 的题占比；目标 ≤0.10。"
+            "fallback 题本身应降级，故该指标需结合 routing 一起看。"
+        ),
+    ),
+    "agent_multi.llm_calls_mean": MetricSpec(
+        name="agent_multi.llm_calls_mean",
+        label="平均 LLM 调用次数",
+        direction=Direction.LOWER_IS_BETTER,
+        threshold=None,
+        unit="次",
+        suite="agent_multi",
+        rationale="来自 done.llm_trace.call_count；目标 ≤5.0，先观测成本结构。",
+    ),
+    "agent_multi.routing_llm_rate": MetricSpec(
+        name="agent_multi.routing_llm_rate",
+        label="LLM 路由占比",
+        direction=Direction.LOWER_IS_BETTER,
+        threshold=None,
+        unit="ratio",
+        suite="agent_multi",
+        rationale=(
+            "非 rules 路由的题占比；Phase 1b 默认规则路由，目标 ≤0.15。"
+            "该指标用于后续开启 AGENT_MULTI_ROUTER 时监控成本。"
+        ),
+    ),
+    "agent_multi.hit_specialist_cap_rate": MetricSpec(
+        name="agent_multi.hit_specialist_cap_rate",
+        label="专家撞轮次上限比例",
+        direction=Direction.LOWER_IS_BETTER,
+        threshold=None,
+        unit="ratio",
+        suite="agent_multi",
+        rationale="任一专家 rounds>=MAX_SPECIALIST_ROUNDS(2) 的题占比；目标 ≤0.20。",
+    ),
+    "agent_multi.verification_critical_ok_rate": MetricSpec(
+        name="agent_multi.verification_critical_ok_rate",
+        label="多 Agent 严重核对通过率",
+        direction=Direction.HIGHER_IS_BETTER,
+        threshold=0.95,
+        unit="ratio",
+        suite="agent_multi",
+        rationale=(
+            "与 agent 线同口径：条款号/数字编造必须接近零。"
+            "多 Agent 合并了所有专家 tool_output_text，核对不应因此变松。"
+        ),
+    ),
+    "agent_multi.verification_ok_rate": MetricSpec(
+        name="agent_multi.verification_ok_rate",
+        label="多 Agent 核对通过率",
+        direction=Direction.HIGHER_IS_BETTER,
+        threshold=0.90,
+        unit="ratio",
+        suite="agent_multi",
+        rationale="与 agent 线同口径；未跑核对的题不计入分母。",
+    ),
+    "agent_multi.false_unavailable_rate": MetricSpec(
+        name="agent_multi.false_unavailable_rate",
+        label="编造工具不可用比例",
+        direction=Direction.LOWER_IS_BETTER,
+        threshold=0.0,
+        unit="ratio",
+        suite="agent_multi",
+        rationale="专家成功调用过工具却声称不可用 = 0 容忍；与旧 agent 线一致。",
+    ),
+    "agent_multi.answer_chars_mean": MetricSpec(
+        name="agent_multi.answer_chars_mean",
+        label="多 Agent 平均答案长度",
+        direction=Direction.HIGHER_IS_BETTER,
+        threshold=None,
+        unit="字",
+        suite="agent_multi",
+        rationale="只观测；用于发现综合生成被截断或降级。",
+    ),
+    "agent_multi.tokens_per_case": MetricSpec(
+        name="agent_multi.tokens_per_case",
+        label="多 Agent 平均 token 用量",
+        direction=Direction.LOWER_IS_BETTER,
+        threshold=None,
+        unit="token",
+        suite="agent_multi",
+        rationale="只观测；多 Agent 的核心成本风险，先看基线再定门槛。",
+        track_regression=False,
+    ),
+    "agent_multi.cost_usd_per_case": MetricSpec(
+        name="agent_multi.cost_usd_per_case",
+        label="多 Agent 平均成本（美元/题）",
+        direction=Direction.LOWER_IS_BETTER,
+        threshold=None,
+        unit="USD",
+        suite="agent_multi",
+        rationale="只观测；未定价/缺 usage 记未测，不补 0。",
+        track_regression=False,
+    ),
 }
 
 

@@ -56,7 +56,7 @@ uv run pytest -q                          # 全量测试（integration 默认排
 uv run pytest tests/test_react_loop.py -v # 单文件
 uv run pytest -k "sse" -v                 # 关键词筛选
 
-python eval/run_all.py --suites agent --gate --fail-on agent  # 统一评测（四线）与回归门禁
+python eval/run_all.py --suites agent --gate --fail-on agent  # 统一评测（五线）与回归门禁
 python eval/ragas_eval.py                # RAG 质量评测（LLM-as-Judge）
 python eval/agent_eval.py                # Agent 工具选择准确率 + 延迟 + token/成本
 python eval/load_eval.py --mode ask --concurrency 1,5,20 --requests 50  # HTTP 并发压测
@@ -112,7 +112,7 @@ src/config.py       Settings dataclass，__post_init__ 校验必需项，缺失�
 - `AGENT_MULTI_AGENT=off|auto|on`，**默认 off**；off 时完全走旧 ReAct，行为不变。`auto` 只对复合/多意图问题走图；`on` 供评测/A-B。依赖缺失自动回落 off。
 - specialist 复用 `react_loop._run_tool_loop`（已从 `_chat_stream_tools` 拆出），**不调用** `_generate_final`；只有 synthesizer 产 token。首 token 前失败/无有效结果自动回退旧 ReAct。
 - 新增 done 字段 `orchestration` / `agent_trace` / `agent_timings`（additive）；多 Agent 下 `tool_name` 仍是 primary specialist 的最后一个成功工具（单字符串）。
-- 评测线 `agent_multi` 与 `eval/test_cases_multi.json` 属于 Phase 1b，尚未落地；当前先用现有 `agent` 线做 flag off 回归。
+- 评测线 `agent_multi` 已落地：`eval/test_cases_multi.json`（20 条）+ 指标注册 + `eval-gate` 接入；`agent` 线强制 off，`agent_multi` 强制 on。首轮只观测，阈值待标定。
 
 ## 不可破坏的契约（红线）
 

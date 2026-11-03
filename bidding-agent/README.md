@@ -54,7 +54,7 @@ DATA_SCHEDULER_ENABLED=1 python main.py scheduler # 常驻调度
 
 ## 评测历史与手动触发
 
-四线评测默认写 `eval/trend.jsonl`（门禁事实源）。要让 `/eval` 看板可查询历史、选择两次运行对比，再加 `--save-db` 写入 PostgreSQL `eval_runs`；已有趋势可幂等回填：
+五线评测默认写 `eval/trend.jsonl`（门禁事实源）。要让 `/eval` 看板可查询历史、选择两次运行对比，再加 `--save-db` 写入 PostgreSQL `eval_runs`；已有趋势可幂等回填：
 
 ```bash
 python eval/run_all.py --suites retrieval_offline --save --save-db

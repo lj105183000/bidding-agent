@@ -77,6 +77,7 @@ def run_multi_agent_stream(
         "specialist_results": [],
         "errors": [],
         "runtime_meta": meta,
+        "trace_recorder": meta.get("llm_trace"),
     }
     graph = get_multi_agent_graph(agent)
 
