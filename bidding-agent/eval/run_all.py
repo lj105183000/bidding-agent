@@ -35,6 +35,7 @@ import re
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -56,9 +57,10 @@ from eval.report import (  # noqa: E402
 
 EVAL_DIR = Path(__file__).resolve().parent
 AGENT_CASES = EVAL_DIR / "test_cases.json"
+AGENT_MULTI_CASES = EVAL_DIR / "test_cases_multi.json"
 
 #: 各条线的名字。用于 --suites 过滤与报告分组。
-ALL_SUITES = ("agent", "retrieval", "retrieval_offline", "rag")
+ALL_SUITES = ("agent", "agent_multi", "retrieval", "retrieval_offline", "rag")
 
 
 def _git_version() -> str:
@@ -103,6 +105,7 @@ def _runtime_config() -> dict:
         "LLM_PROVIDER", "DEEPSEEK_MODEL", "ZHIPU_MODEL",
         "RAG_PROMPT_VARIANT", "RERANK_ENABLED",
         "AGENT_PLANNING", "AGENT_MEMORY", "AGENT_COMPACT",
+        "AGENT_MULTI_AGENT", "AGENT_MULTI_ROUTER",
         # 裁判（RAG 线专用；不设时留空，由 ragas_eval 的默认值兜底）
         "RAGAS_JUDGE_MODEL", "RAGAS_JUDGE_ATTEMPTS",
     )
@@ -136,6 +139,92 @@ def _p95(values: list[float]) -> float:
         return 0.0
     ordered = sorted(values)
     return float(ordered[min(len(ordered) - 1, int(round(0.95 * (len(ordered) - 1))))])
+
+
+@contextmanager
+def _suite_env(suite: str):
+    """按评测线强制开关，避免本地 shell 的 AGENT_MULTI_AGENT 污染基线。
+
+    - `agent`：强制 off，保持旧 ReAct 口径；
+    - `agent_multi`：强制 on + 规则路由；
+    - 其它线：不覆盖。
+    """
+    if suite == "agent_multi":
+        overrides = {"AGENT_MULTI_AGENT": "on", "AGENT_MULTI_ROUTER": "off"}
+    elif suite == "agent":
+        overrides = {"AGENT_MULTI_AGENT": "off"}
+    else:
+        overrides = {}
+    old = {key: os.environ.get(key) for key in overrides}
+    os.environ.update(overrides)
+    try:
+        yield
+    finally:
+        for key, value in old.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+# ===========================================================================
+# 多 Agent 线：辅助纯函数（可单测，不跑真实 Agent）
+# ===========================================================================
+
+
+def _multi_agents(result: dict) -> list[str]:
+    """从 done 帧提取实际路由的 specialist 列表。"""
+    orchestration = result.get("orchestration")
+    if isinstance(orchestration, dict):
+        route = orchestration.get("route")
+        if isinstance(route, list):
+            return [str(agent) for agent in route if agent]
+    traces = result.get("agent_trace")
+    if isinstance(traces, list):
+        return [
+            str(item.get("agent"))
+            for item in traces
+            if isinstance(item, dict) and item.get("agent")
+        ]
+    return []
+
+
+def _multi_tool_names_by_agent(result: dict) -> dict[str, list[str]]:
+    """按 specialist 聚合成功执行的工具名（来自 tool_timings[].agent）。"""
+    out: dict[str, list[str]] = {}
+    for timing in result.get("tool_timings") or []:
+        if not isinstance(timing, dict) or not timing.get("ok"):
+            continue
+        agent = str(timing.get("agent") or "")
+        name = str(timing.get("name") or "")
+        if agent and name:
+            out.setdefault(agent, []).append(name)
+    return out
+
+
+def _multi_routing_ok(case: dict, actual: list[str], fallback: bool) -> bool:
+    """路由判定：期望专家被覆盖、不出现禁止专家；fallback 题要求真的降级。"""
+    expected = set(case.get("expected_agents") or [])
+    actual_set = set(actual or [])
+    if case.get("expect_fallback"):
+        return bool(fallback) and not actual_set
+    forbidden = set(case.get("forbidden_agents") or [])
+    return expected <= actual_set and not (forbidden & actual_set)
+
+
+def _multi_specialist_tools_ok(
+    case: dict, by_agent: dict[str, list[str]]
+) -> bool:
+    """每个期望 specialist 至少命中一个期望工具。"""
+    expected = case.get("expected_tools") or {}
+    if not isinstance(expected, dict):
+        return True
+    for agent, tools in expected.items():
+        if not tools:
+            continue
+        if not (set(tools) & set(by_agent.get(agent, []))):
+            return False
+    return True
 
 
 # ===========================================================================
@@ -327,6 +416,197 @@ def run_agent_suite(limit: int = 0, web_mode: str = "off") -> SuiteReport:
         "agent.prompt_cache_hit_rate",
         agg["prompt_cache_hit_rate"],
         note="缓存命中 token / prompt token；厂商不返回缓存字段时为未测",
+    ))
+    return suite
+
+
+def run_agent_multi_suite(limit: int = 0, web_mode: str = "off") -> SuiteReport:
+    """多 Agent 线：路由覆盖 + 专家工具 + 综合引用 + 延迟/降级。
+
+    与 `run_agent_suite` 独立：旧的 `agent` 线保持单 Agent 口径，
+    本线由 `_suite_env("agent_multi")` 强制 `AGENT_MULTI_AGENT=on`。
+    """
+    suite = SuiteReport(suite="agent_multi")
+    try:
+        from src.agent import BiddingAgent
+        from src.agent.constants import MAX_SPECIALIST_ROUNDS
+
+        agent = BiddingAgent()
+    except Exception as exc:
+        suite.note = f"Agent 初始化失败：{type(exc).__name__}: {exc}"
+        return suite
+
+    cases = load_cases(AGENT_MULTI_CASES, required=("question", "expected_agents"))
+    if limit:
+        cases = cases[:limit]
+
+    skipped: list[str] = []
+    if web_mode == "off":
+        kept = []
+        for case in cases:
+            if case.get("requires_web"):
+                skipped.append(case["question"][:40])
+                continue
+            kept.append(case)
+        cases = kept
+
+    suite.case_count = len(cases)
+    suite.note = f"web_mode={web_mode}；AGENT_MULTI_AGENT=on"
+    if skipped:
+        suite.note += f"；跳过 {len(skipped)} 题需联网用例（当前口径不暴露联网工具）"
+
+    routing_ok = specialist_ok = citation_ok = 0
+    partial = fallback = routing_llm = hit_cap = 0
+    latencies: list[float] = []
+    llm_calls: list[float] = []
+    per_case_metrics = []
+    errors: list[str] = []
+
+    for i, case in enumerate(cases, 1):
+        try:
+            result = agent.chat(
+                case["question"],
+                web_search_enabled=(web_mode == "on"),
+                auto_web_fallback=(web_mode == "auto"),
+            )
+        except Exception as exc:
+            errors.append(f"#{i} {type(exc).__name__}: {exc}")
+            per_case_metrics.append(extract_process_metrics({}))
+            continue
+
+        if not result.get("elapsed_ms"):
+            errors.append(f"#{i} 走了降级/错误路径（无计时）")
+            per_case_metrics.append(extract_process_metrics(result))
+            continue
+
+        orchestration = result.get("orchestration")
+        orch = orchestration if isinstance(orchestration, dict) else {}
+        actual = _multi_agents(result)
+        is_fallback = (not orch) or (orch.get("fallback") not in (None, "none"))
+
+        if _multi_routing_ok(case, actual, is_fallback):
+            routing_ok += 1
+        if _multi_specialist_tools_ok(case, _multi_tool_names_by_agent(result)):
+            specialist_ok += 1
+
+        if not case.get("require_citation", True):
+            citation_ok += 1
+        else:
+            verification = result.get("verification")
+            has_source = bool(result.get("sources") or result.get("web_sources"))
+            if has_source and isinstance(verification, dict) and verification.get("ok"):
+                citation_ok += 1
+
+        traces = result.get("agent_trace") or []
+        if orch.get("partial") or any(
+            isinstance(item, dict) and item.get("status") != "ok"
+            for item in traces
+        ):
+            partial += 1
+        if is_fallback:
+            fallback += 1
+        if orch.get("router") not in (None, "rules"):
+            routing_llm += 1
+        if any(
+            isinstance(item, dict) and item.get("hit_cap")
+            for item in traces
+        ):
+            hit_cap += 1
+
+        trace = result.get("llm_trace")
+        if isinstance(trace, dict) and isinstance(trace.get("call_count"), (int, float)):
+            llm_calls.append(float(trace["call_count"]))
+        latencies.append(float(result["elapsed_ms"]))
+        per_case_metrics.append(extract_process_metrics(result))
+        print(f"  进度 {i}/{len(cases)}", end="\r", flush=True)
+    print()
+
+    n = len(cases)
+    agg = aggregate(per_case_metrics)
+    suite.ran = True
+    if errors:
+        suite.note += f"；{len(errors)} 题异常：{errors[0][:80]}"
+
+    suite.results.append(make_result(
+        "agent_multi.routing_accuracy",
+        routing_ok / n if n else None,
+        note=f"{routing_ok}/{n} 题路由覆盖期望专家（fallback 题要求真的降级）",
+    ))
+    suite.results.append(make_result(
+        "agent_multi.specialist_tool_accuracy",
+        specialist_ok / n if n else None,
+        note=f"{specialist_ok}/{n} 题每个期望专家命中期望工具",
+    ))
+    suite.results.append(make_result(
+        "agent_multi.synthesis_citation_rate",
+        citation_ok / n if n else None,
+        note="verification.ok 且 sources/web_sources 非空；require_citation=false 直接计通过",
+    ))
+    suite.results.append(make_result("agent_multi.latency_p95", _p95(latencies)))
+    suite.results.append(make_result(
+        "agent_multi.partial_rate",
+        (partial / n) if n else None,
+        note=f"{partial}/{n} 题有专家非 ok 或 orchestration.partial",
+    ))
+    suite.results.append(make_result(
+        "agent_multi.fallback_rate",
+        (fallback / n) if n else None,
+        note=f"{fallback}/{n} 题回落旧 ReAct/RAG（orchestration 缺失或 fallback!=none）",
+    ))
+    suite.results.append(make_result(
+        "agent_multi.llm_calls_mean",
+        (sum(llm_calls) / len(llm_calls)) if llm_calls else None,
+        note=f"{len(llm_calls)}/{n} 题有 llm_trace.call_count",
+    ))
+    suite.results.append(make_result(
+        "agent_multi.routing_llm_rate",
+        (routing_llm / n) if n else None,
+        note=f"{routing_llm}/{n} 题使用非规则路由",
+    ))
+    suite.results.append(make_result(
+        "agent_multi.hit_specialist_cap_rate",
+        (hit_cap / n) if n else None,
+        note=f"{hit_cap}/{n} 题有专家撞 {MAX_SPECIALIST_ROUNDS} 轮上限",
+    ))
+    suite.results.append(make_result(
+        "agent_multi.verification_critical_ok_rate",
+        agg["verification_critical_ok_rate"],
+        note=(
+            "未测（本轮没有题目产生核对结果）"
+            if agg["verification_critical_ok_rate"] is None
+            else f"条款号编造 {agg['unsupported_article_cases']} 题、"
+                 f"数字编造 {agg['unsupported_number_cases']} 题"
+        ),
+    ))
+    suite.results.append(make_result(
+        "agent_multi.verification_ok_rate",
+        agg["verification_ok_rate"],
+        note=(
+            "未测（本轮没有题目产生核对结果）"
+            if agg["verification_ok_rate"] is None
+            else f"含法规名未在结果中 {agg['unsupported_law_cases']} 题（低风险）"
+        ),
+    ))
+    suite.results.append(make_result(
+        "agent_multi.false_unavailable_rate",
+        (agg["false_unavailable_cases"] / n) if n else None,
+        note=f"编造工具不可用 {agg['false_unavailable_cases']} 题",
+    ))
+    suite.results.append(make_result(
+        "agent_multi.answer_chars_mean", agg["answer_chars_mean"]
+    ))
+    suite.results.append(make_result(
+        "agent_multi.tokens_per_case",
+        agg["tokens_per_case"],
+        note=f"{agg['usage_cases']}/{n} 题有 token 数据",
+    ))
+    suite.results.append(make_result(
+        "agent_multi.cost_usd_per_case",
+        agg["cost_usd_per_case"],
+        note=(
+            f"{agg['cost_cases']}/{n} 题可完整定价；"
+            f"{agg['unpriced_calls']} 次调用无法定价"
+        ),
     ))
     return suite
 
@@ -800,6 +1080,11 @@ def build_report(
             "agent", "跑 Agent 线…",
             lambda: run_agent_suite(limit=limit, web_mode=web_mode),
         ))
+    if "agent_multi" in suites:
+        runners.append((
+            "agent_multi", "跑 多 Agent 线…",
+            lambda: run_agent_multi_suite(limit=limit, web_mode=web_mode),
+        ))
     if "retrieval" in suites:
         runners.append((
             "retrieval", "跑 检索线…",
@@ -821,15 +1106,17 @@ def build_report(
     for idx, (name, banner, run) in enumerate(runners, start=1):
         print(f"[{idx}/{len(runners)}] {banner}")
         if repeat <= 1:
-            report.suites.append(run())  # type: ignore[operator]
+            with _suite_env(name):
+                report.suites.append(run())  # type: ignore[operator]
             continue
         # ---- 重复采样 ----
         from eval.repeat import merge_suite_runs
 
         collected = []
-        for i in range(repeat):
-            print(f"    第 {i + 1}/{repeat} 次…")
-            collected.append(run())  # type: ignore[operator]
+        with _suite_env(name):
+            for i in range(repeat):
+                print(f"    第 {i + 1}/{repeat} 次…")
+                collected.append(run())  # type: ignore[operator]
         merged = merge_suite_runs(collected)
         print(f"    {name} 已按 {repeat} 次取中位")
         report.suites.append(merged)

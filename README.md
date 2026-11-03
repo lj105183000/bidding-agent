@@ -85,7 +85,7 @@ uv run uvicorn api.server:app --host 0.0.0.0 --port 8001
 | `DATA_SCHEDULER_ENABLED=1 python main.py scheduler` | 常驻调度（独立进程，只跑幂等任务） |
 | `uv run pytest -q` | 全量后端测试（在 `bidding-agent/` 下执行） |
 | `npm run dev` / `npm run build` | 前端开发 / 构建（在 `frontend/` 下执行） |
-| `python eval/run_all.py --suites agent --gate --fail-on agent` | 统一评测（四线）与回归门禁 |
+| `python eval/run_all.py --suites agent --gate --fail-on agent` | 统一评测（五线）与回归门禁 |
 | `python eval/ragas_eval.py` | RAG 质量评测（LLM-as-Judge） |
 | `python eval/agent_eval.py` | Agent 工具选择准确率 + 延迟 + token/成本 |
 | `python eval/load_eval.py --mode ask --concurrency 1,5,20 --requests 50` | HTTP 并发压测（ask 冒烟 / chat 正式） |
@@ -133,7 +133,7 @@ uv run uvicorn api.server:app --host 0.0.0.0 --port 8001
 │   │   ├── api_access.py            # /api/logs、/api/metrics 访问控制
 │   │   └── langfuse_tracing.py      # 链路追踪（可选依赖）
 │   ├── tests/                       # pytest 全量（integration 默认排除；当前 3197 passed / 3 skipped / 10 deselected）
-│   ├── eval/                        # 分线评测：agent / retrieval / retrieval_offline / rag 四线
+│   ├── eval/                        # 分线评测：agent / agent_multi / retrieval / retrieval_offline / rag 五线
 │   ├── batch/                       # 数据处理脚本
 │   └── docs/                        # 开发文档 / 技术栈 / 组件工作机制
 ├── docs/superpowers/                # 设计与实施记录（plans / specs）

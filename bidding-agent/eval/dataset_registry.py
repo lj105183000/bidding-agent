@@ -83,6 +83,17 @@ DATASETS: dict[str, DatasetInfo] = {
         description="每题标 expected_tool，测工具选择是否符合预期；含少量多工具题",
         key_fields=("question", "expected_tool"),
     ),
+    "agent_multi": DatasetInfo(
+        suite="agent_multi",
+        label="多 Agent 路由/专家集",
+        source_kind="file",
+        path=EVAL_DIR / "test_cases_multi.json",
+        description=(
+            "每题标 expected_agents / expected_tools，测专家路由、专家工具命中、"
+            "综合引用与降级；与单 Agent 的 test_cases.json 是两套数据"
+        ),
+        key_fields=("question", "expected_agents"),
+    ),
     "retrieval": DatasetInfo(
         suite="retrieval",
         label="检索切题主题集",

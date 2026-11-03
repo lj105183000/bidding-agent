@@ -80,6 +80,7 @@ def merge_results(results: list[dict]) -> dict:
             "status": str(result.get("status") or ""),
             "elapsed_ms": int(result.get("elapsed_ms") or 0),
             "rounds": int(result.get("rounds") or 0),
+            "hit_cap": bool(result.get("hit_cap")),
             "tool_name": str(result.get("tool_name") or ""),
             "tool_calls": len(result.get("tool_names") or []),
             "sources": len(result.get("sources") or []),

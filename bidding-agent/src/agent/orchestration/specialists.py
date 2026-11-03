@@ -68,6 +68,7 @@ def run_specialist(
     provider: str = "",
     web_enabled: bool = False,
     session_id: str = "",
+    trace_recorder=None,
 ) -> dict:
     """执行一个 specialist；任何异常都收敛为结构化结果，不向上抛。"""
     t0 = time.monotonic()
@@ -79,6 +80,13 @@ def run_specialist(
             client = agent._get_llm_client(provider)
             if hasattr(client, "clone"):
                 client = client.clone()
+        # 共享主请求的 LLMTraceRecorder（线程安全），否则 done.llm_trace
+        # 只统计综合生成，看不到 specialist 的调用成本。
+        if trace_recorder is not None:
+            try:
+                client.trace_recorder = trace_recorder
+            except Exception:  # noqa: BLE001 - 观测不能影响问答
+                logger.debug("挂载 specialist trace_recorder 失败", exc_info=True)
         meta = {
             "sources": [],
             "web_sources": [],
@@ -183,6 +191,7 @@ def run_specialist_with_timeout(
     provider: str = "",
     web_enabled: bool = False,
     session_id: str = "",
+    trace_recorder=None,
     timeout: float = MULTI_AGENT_SPECIALIST_TIMEOUT_S,
 ) -> dict:
     """带墙钟超时的 specialist；超时返回 partial 结果，不阻塞其他专家。"""
@@ -195,6 +204,7 @@ def run_specialist_with_timeout(
         provider=provider,
         web_enabled=web_enabled,
         session_id=session_id,
+        trace_recorder=trace_recorder,
     )
     try:
         return future.result(timeout=timeout)
