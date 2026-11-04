@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   DECISION_LABELS,
   MODE_LABELS,
+  ROUTER_LABELS,
   formatMs,
   formatRate,
   hasMultiAgentData,
@@ -67,5 +68,13 @@ describe('decision labels', () => {
   it('labels the auto-declined reasons in Chinese', () => {
     expect(DECISION_LABELS.declined_single_expert).toBe('单专家回退')
     expect(DECISION_LABELS.declined_short).toBe('短问题回退')
+  })
+})
+
+describe('router labels', () => {
+  it('maps router names to readable labels', () => {
+    const rows = rowsFromCounts({ rules: 2, llm: 1 }, ROUTER_LABELS)
+    expect(rows.find((row) => row.key === 'rules')?.label).toBe('规则')
+    expect(rows.find((row) => row.key === 'llm')?.label).toBe('LLM')
   })
 })

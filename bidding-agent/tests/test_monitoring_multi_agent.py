@@ -33,6 +33,9 @@ def _done(
     sources: list | None = None,
     configured: str | None = None,
     reason: str | None = None,
+    router: str = "rules",
+    deadline: bool = False,
+    budget: bool = False,
 ) -> dict:
     return {
         "multi_agent": {
@@ -42,8 +45,11 @@ def _done(
             "activated": activated,
             "decision": decision,
             "route": ["data", "retrieval"] if activated else [],
+            "router": router,
             "fallback": fallback,
             "partial": partial,
+            "deadline_exceeded": deadline,
+            "budget_exhausted": budget,
         },
         "elapsed_ms": elapsed,
         "llm_trace": (
@@ -153,6 +159,30 @@ def test_configured_mode_and_reason_counts():
     assert snap["configured_reason_counts"] == [
         {"mode": "auto", "reason": "langgraph_unavailable", "requests": 1}
     ]
+
+
+def test_router_deadline_budget_counts():
+    record_done(_done(router="rules"))
+    record_done(_done(router="llm", deadline=True))
+    record_done(_done(router="llm_fallback", budget=True))
+    snap = multi_agent_snapshot()
+    summary = snap["summary"]
+    assert summary["router_counts"] == {
+        "rules": 1,
+        "llm": 1,
+        "llm_fallback": 1,
+    }
+    assert summary["routing_llm_rate"] == 0.6667
+    assert summary["deadline_count"] == 1
+    assert summary["deadline_rate"] == 0.3333
+    assert summary["budget_count"] == 1
+    assert summary["budget_rate"] == 0.3333
+
+    auto = snap["by_mode"]["auto"]
+    assert auto["router_counts"]["llm"] == 1
+    assert auto["routing_llm_rate"] == 0.6667
+    assert auto["deadline_rate"] == 0.3333
+    assert auto["budget_rate"] == 0.3333
 
 
 def test_record_never_raises_on_garbage():

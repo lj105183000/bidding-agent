@@ -508,6 +508,7 @@ class TestPrometheusFormat:
             )
             t = self._text()
             assert "bidding_multi_agent_requests_total" in t
+            assert "bidding_multi_agent_router_requests_total" in t
             assert 'mode="auto"' in t
             assert 'decision="activated"' in t
             # TYPE 仍不能重复

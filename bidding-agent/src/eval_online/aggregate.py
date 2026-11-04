@@ -154,6 +154,7 @@ _DECISIONS = (
 )
 _REASONS = ("active", "off", "invalid_env", "langgraph_unavailable", "unknown")
 _FALLBACKS = ("none", "legacy", "fragment", "unknown")
+_ROUTERS = ("off", "rules", "llm", "llm_fallback", "unknown")
 
 
 def _counts(rows: list[dict], key: str, allowed: tuple[str, ...]) -> dict[str, int]:
@@ -162,6 +163,31 @@ def _counts(rows: list[dict], key: str, allowed: tuple[str, ...]) -> dict[str, i
         value = str(r.get(key) or "unknown")
         out[value if value in out else "unknown"] += 1
     return out
+
+
+def _routing_llm_rate(rows: list[dict]) -> float | None:
+    """LLM 路由尝试率；分母只含规则/LLM/LLM 回落的可判定样本。"""
+    known = [
+        r
+        for r in rows
+        if r.get("multi_agent_router") in ("rules", "llm", "llm_fallback")
+    ]
+    if not known:
+        return None
+    attempted = sum(
+        1
+        for r in known
+        if r.get("multi_agent_router") in ("llm", "llm_fallback")
+    )
+    return round(attempted / len(known), 4)
+
+
+def _bool_rate(rows: list[dict], key: str) -> tuple[int, int, float | None]:
+    vals = [r.get(key) for r in rows if isinstance(r.get(key), bool)]
+    if not vals:
+        return 0, 0, None
+    hits = sum(1 for v in vals if v)
+    return hits, len(vals), round(hits / len(vals), 4)
 
 
 def _llm_call_vals(rows: list[dict]) -> list[float]:
@@ -234,9 +260,23 @@ def _multi_agent_summary(rows: list[dict]) -> dict[str, Any]:
             if isinstance(r.get("multi_agent_partial"), bool)
         ]
         verify_rows = [r for r in group if r.get("verify_checked") is True]
+        deadline_count, deadline_samples, deadline_rate = _bool_rate(
+            group_activated, "multi_agent_deadline_exceeded"
+        )
+        budget_count, budget_samples, budget_rate = _bool_rate(
+            group_activated, "multi_agent_budget_exhausted"
+        )
         by_mode[mode] = {
             "n": len(group),
             "decision_counts": _counts(group, "multi_agent_decision", _DECISIONS),
+            "router_counts": _counts(group, "multi_agent_router", _ROUTERS),
+            "routing_llm_rate": _routing_llm_rate(group),
+            "deadline_count": deadline_count,
+            "deadline_samples": deadline_samples,
+            "deadline_rate": deadline_rate,
+            "budget_count": budget_count,
+            "budget_samples": budget_samples,
+            "budget_rate": budget_rate,
             "activated_rate": (
                 sum(1 for r in group_auto_on if r.get("multi_agent_activated"))
                 / len(group_auto_on)
@@ -264,6 +304,12 @@ def _multi_agent_summary(rows: list[dict]) -> dict[str, Any]:
             "no_source_rate": _rate(group, "no_source"),
         }
 
+    deadline_count, deadline_samples, deadline_rate = _bool_rate(
+        activated, "multi_agent_deadline_exceeded"
+    )
+    budget_count, budget_samples, budget_rate = _bool_rate(
+        activated, "multi_agent_budget_exhausted"
+    )
     return {
         "mode_counts": _counts(rows, "multi_agent_mode", _MODES),
         "configured_mode_counts": _counts(
@@ -271,6 +317,14 @@ def _multi_agent_summary(rows: list[dict]) -> dict[str, Any]:
         ),
         "mode_reason_counts": _counts(rows, "multi_agent_mode_reason", _REASONS),
         "decision_counts": _counts(rows, "multi_agent_decision", _DECISIONS),
+        "router_counts": _counts(rows, "multi_agent_router", _ROUTERS),
+        "routing_llm_rate": _routing_llm_rate(rows),
+        "deadline_count": deadline_count,
+        "deadline_samples": deadline_samples,
+        "deadline_rate": deadline_rate,
+        "budget_count": budget_count,
+        "budget_samples": budget_samples,
+        "budget_rate": budget_rate,
         "activated_rate": (
             sum(1 for r in auto_on if r.get("multi_agent_activated")) / len(auto_on)
             if auto_on
@@ -464,6 +518,8 @@ def summarize_rows(rows: list[dict]) -> dict[str, Any]:
             "relevance_* 依赖检索侧给的评分；未配置评分的来源不计入（故 n 可能小于样本数）。",
             "多 Agent 口径：在线样本默认采样 20%；激活率/延迟是采样估计，全量计数看 /api/metrics。",
             "旧样本没有 multi_agent 字段，计入 unknown，不参与激活率/fallback 分母。",
+            "routing_llm_rate 的分母只含 router in rules/llm/llm_fallback 的样本；"
+            "deadline_rate/budget_rate 的分母只含 activated=true 的样本。",
             "verify_ok_rate 的分母只含实际跑了核对（verify_checked）的样本，不是全部样本。",
             "服务重启后 /api/metrics 计数归零；在线样本跨重启保留。",
         ],

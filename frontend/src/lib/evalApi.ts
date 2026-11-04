@@ -83,6 +83,14 @@ export interface StatBlock {
 export interface MultiAgentModeSummary {
   n?: number
   decision_counts?: Record<string, number>
+  router_counts?: Record<string, number>
+  routing_llm_rate?: number | null
+  deadline_count?: number
+  deadline_samples?: number
+  deadline_rate?: number | null
+  budget_count?: number
+  budget_samples?: number
+  budget_rate?: number | null
   activated_rate?: number | null
   activated_samples?: number
   fallback_counts?: Record<string, number>
@@ -104,6 +112,14 @@ export interface OnlineMultiAgentSummary {
   configured_mode_counts?: Record<string, number>
   mode_reason_counts?: Record<string, number>
   decision_counts?: Record<string, number>
+  router_counts?: Record<string, number>
+  routing_llm_rate?: number | null
+  deadline_count?: number
+  deadline_samples?: number
+  deadline_rate?: number | null
+  budget_count?: number
+  budget_samples?: number
+  budget_rate?: number | null
   activated_rate?: number | null
   activated_samples?: number
   partial_rate?: number | null

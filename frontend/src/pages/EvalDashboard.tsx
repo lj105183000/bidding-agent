@@ -59,6 +59,7 @@ import {
   FALLBACK_LABELS,
   MODE_LABELS,
   REASON_LABELS,
+  ROUTER_LABELS,
   formatMs,
   formatRate,
   hasMultiAgentData,
@@ -215,6 +216,7 @@ function MultiAgentCanaryPanel({ ma }: { ma: OnlineMultiAgentSummary }) {
   const decisionRows = rowsFromCounts(ma.decision_counts, DECISION_LABELS)
   const fallbackRows = rowsFromCounts(ma.fallback_counts, FALLBACK_LABELS)
   const reasonRows = rowsFromCounts(ma.mode_reason_counts, REASON_LABELS)
+  const routerRows = rowsFromCounts(ma.router_counts, ROUTER_LABELS)
   const warningReasons = ['langgraph_unavailable', 'invalid_env'].filter(
     (key) => (ma.mode_reason_counts?.[key] ?? 0) > 0,
   )
@@ -260,11 +262,27 @@ function MultiAgentCanaryPanel({ ma }: { ma: OnlineMultiAgentSummary }) {
           value={ma.partial_rate}
           hint="分母仅 activated=true 的样本"
         />
+        <RateRow
+          label="LLM 路由率"
+          value={ma.routing_llm_rate}
+          hint="router != rules 的占比；含 llm_fallback 尝试"
+        />
+        <RateRow
+          label="deadline 比例"
+          value={ma.deadline_rate}
+          hint="多 Agent 总 deadline 触发率；分母仅 activated 样本"
+        />
+        <RateRow
+          label="预算耗尽比例"
+          value={ma.budget_rate}
+          hint="8 次 LLM 预算触顶率；分母仅 activated 样本"
+        />
       </div>
 
       <div className="mt-2 space-y-1">
         <CountChips title="模式" rows={modeRows} />
         <CountChips title="决策" rows={decisionRows} />
+        <CountChips title="路由" rows={routerRows} />
         <CountChips title="回退" rows={fallbackRows} />
         <CountChips title="生效原因" rows={reasonRows} />
       </div>
@@ -281,6 +299,8 @@ function MultiAgentCanaryPanel({ ma }: { ma: OnlineMultiAgentSummary }) {
                 <th className="py-0.5 pr-3 font-normal">P95</th>
                 <th className="py-0.5 pr-3 font-normal">LLM 均值</th>
                 <th className="py-0.5 pr-3 font-normal">critical 核对</th>
+                <th className="py-0.5 pr-3 font-normal">deadline</th>
+                <th className="py-0.5 pr-3 font-normal">预算</th>
                 <th className="py-0.5 font-normal">无来源</th>
               </tr>
             </thead>
@@ -310,6 +330,12 @@ function MultiAgentCanaryPanel({ ma }: { ma: OnlineMultiAgentSummary }) {
                         stats?.verify_critical_ok_rate,
                         stats?.verify_checked,
                       )}
+                    </td>
+                    <td className="py-0.5 pr-3 tabular-nums">
+                      {formatRate(stats?.deadline_rate, stats?.deadline_samples)}
+                    </td>
+                    <td className="py-0.5 pr-3 tabular-nums">
+                      {formatRate(stats?.budget_rate, stats?.budget_samples)}
                     </td>
                     <td className="py-0.5 tabular-nums">
                       {formatRate(stats?.no_source_rate)}
