@@ -235,6 +235,42 @@ def evaluate(meta: dict, done: dict, *, question: str = "", has_history: bool = 
             #: 路由明细（仅用于人工排查；不在聚合里按 agent 拆标签）
             "multi_agent_route": ma_route,
             "multi_agent_route_size": len(ma_route) if ma_route is not None else None,
+            "multi_agent_router": (
+                str(ma["router"]) if ma and ma.get("router") else None
+            ),
+            "multi_agent_router_reason": (
+                str(ma["router_reason"]) if ma and ma.get("router_reason") else None
+            ),
+            "multi_agent_router_attempted": (
+                bool(ma["router_attempted"])
+                if ma and "router_attempted" in ma
+                else None
+            ),
+            "multi_agent_router_elapsed_ms": (
+                int(_num(ma.get("router_elapsed_ms")) or 0)
+                if ma and _num(ma.get("router_elapsed_ms")) is not None
+                else None
+            ),
+            "multi_agent_deadline_exceeded": (
+                bool(ma["deadline_exceeded"])
+                if ma and "deadline_exceeded" in ma
+                else None
+            ),
+            "multi_agent_budget_exhausted": (
+                bool(ma["budget_exhausted"])
+                if ma and "budget_exhausted" in ma
+                else None
+            ),
+            "multi_agent_llm_calls_used": (
+                int(_num(ma.get("llm_calls_used")))
+                if ma and _num(ma.get("llm_calls_used")) is not None
+                else None
+            ),
+            "multi_agent_llm_call_limit": (
+                int(_num(ma.get("llm_call_limit")))
+                if ma and _num(ma.get("llm_call_limit")) is not None
+                else None
+            ),
             #: 是否实际跑了核对 —— verify_ok_rate 的分母必须用它，而不是样本总数
             "verify_checked": isinstance(verification_raw, dict)
             and bool(verification_raw),

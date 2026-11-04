@@ -39,6 +39,14 @@ export const FALLBACK_LABELS: Record<string, string> = {
   unknown: '未知',
 }
 
+export const ROUTER_LABELS: Record<string, string> = {
+  off: 'off',
+  rules: '规则',
+  llm: 'LLM',
+  llm_fallback: 'LLM 回落',
+  unknown: '未知',
+}
+
 export const REASON_LABELS: Record<string, string> = {
   active: '生效',
   off: 'off',

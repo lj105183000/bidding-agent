@@ -910,5 +910,77 @@ def render_prometheus(
                 if isinstance(stats, dict) and stats.get("partial_rate") is not None
             ],
         )
+        emit(
+            "bidding_multi_agent_router_requests_total",
+            "按有效模式/router 的累计请求数",
+            "counter",
+            [
+                (
+                    f'{{mode="{mode}",router="{router}"}}',
+                    float(count),
+                )
+                for mode, stats in by_mode.items()
+                if isinstance(stats, dict)
+                for router, count in (stats.get("router_counts") or {}).items()
+            ],
+        )
+        emit(
+            "bidding_multi_agent_routing_llm_rate",
+            "按有效模式的 LLM 路由尝试率",
+            "gauge",
+            [
+                (f'{{mode="{mode}"}}', float(stats["routing_llm_rate"]))
+                for mode, stats in by_mode.items()
+                if isinstance(stats, dict)
+                and stats.get("routing_llm_rate") is not None
+            ],
+        )
+        emit(
+            "bidding_multi_agent_deadline_total",
+            "按有效模式的 deadline 触发数",
+            "counter",
+            [
+                (
+                    f'{{mode="{mode}"}}',
+                    float(stats.get("deadline_count", 0)),
+                )
+                for mode, stats in by_mode.items()
+                if isinstance(stats, dict)
+            ],
+        )
+        emit(
+            "bidding_multi_agent_budget_total",
+            "按有效模式的 LLM 预算耗尽数",
+            "counter",
+            [
+                (
+                    f'{{mode="{mode}"}}',
+                    float(stats.get("budget_count", 0)),
+                )
+                for mode, stats in by_mode.items()
+                if isinstance(stats, dict)
+            ],
+        )
+        emit(
+            "bidding_multi_agent_deadline_ratio",
+            "按有效模式的 deadline 触发率（仅激活样本）",
+            "gauge",
+            [
+                (f'{{mode="{mode}"}}', float(stats["deadline_rate"]))
+                for mode, stats in by_mode.items()
+                if isinstance(stats, dict)
+                and stats.get("deadline_rate") is not None
+            ],
+        )
+        emit(
+            "bidding_multi_agent_budget_ratio",
+            "按有效模式的预算耗尽率（仅激活样本）",
+            "gauge",
+            [
+                (f'{{mode="{mode}"}}', float(stats["budget_rate"]))
+                for mode, stats in by_mode.items()
+                if isinstance(stats, dict) and stats.get("budget_rate") is not None
+            ],
+        )
 
     return "\n".join(lines) + "\n"

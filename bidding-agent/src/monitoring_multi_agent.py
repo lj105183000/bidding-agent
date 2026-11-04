@@ -45,6 +45,7 @@ DECISIONS = (
 )
 FALLBACKS = ("none", "legacy", "fragment", "unknown")
 REASONS = ("active", "off", "invalid_env", "langgraph_unavailable", "unknown")
+ROUTERS = ("off", "rules", "llm", "llm_fallback", "unknown")
 
 
 def _num(value: Any) -> float | None:
@@ -95,6 +96,9 @@ class _Bucket:
     verify_critical_ok: int = 0
     answered: int = 0
     no_source: int = 0
+    router_counts: dict[str, int] = field(default_factory=dict)
+    deadline_count: int = 0
+    budget_count: int = 0
 
     def add_sample(self, bucket: list[float], value: float | None) -> None:
         if value is None:
@@ -135,6 +139,9 @@ class MultiAgentMetrics:
             partial = bool(ma.get("partial")) if activated else False
             configured = _pick(ma.get("configured_mode"), MODES)
             reason = _pick(ma.get("mode_reason"), REASONS)
+            router = _pick(ma.get("router"), ROUTERS)
+            deadline = bool(ma.get("deadline_exceeded"))
+            budget = bool(ma.get("budget_exhausted"))
 
             with self._lock:
                 self._configured_counts[configured] = (
@@ -151,6 +158,11 @@ class MultiAgentMetrics:
                 bucket.requests += 1
                 bucket.clarified += int(clarified)
                 bucket.activated += int(activated)
+                bucket.router_counts[router] = (
+                    bucket.router_counts.get(router, 0) + 1
+                )
+                bucket.deadline_count += int(deadline)
+                bucket.budget_count += int(budget)
                 if activated:
                     bucket.partial += int(partial)
                 elif mode in ("auto", "on"):
@@ -195,6 +207,11 @@ class MultiAgentMetrics:
             "activated": b.activated,
             "declined": b.declined,
             "partial_count": b.partial,
+            "router_counts": dict(sorted(b.router_counts.items())),
+            "deadline_count": b.deadline_count,
+            "deadline_rate": _rate(b.deadline_count, b.activated),
+            "budget_count": b.budget_count,
+            "budget_rate": _rate(b.budget_count, b.activated),
             "latency_ms": _stat(b.latency_ms),
             "llm_calls": _stat(b.llm_calls),
             "tokens": _stat(b.tokens),
@@ -244,11 +261,25 @@ class MultiAgentMetrics:
             "fallback_legacy": 0,
             "fallback_fragment": 0,
             "partial": 0,
+            "router_counts": {},
+            "routing_llm_rate": None,
+            "deadline_count": 0,
+            "deadline_rate": None,
+            "budget_count": 0,
+            "budget_rate": None,
         }
+        activated_total = 0
         by_mode: dict[str, dict] = {}
         for g in groups:
             mode = g["mode"]
             activated = bool(g["activated"])
+            activated_total += g["activated"]
+            for router, count in (g.get("router_counts") or {}).items():
+                summary["router_counts"][router] = (
+                    summary["router_counts"].get(router, 0) + count
+                )
+            summary["deadline_count"] += g.get("deadline_count", 0)
+            summary["budget_count"] += g.get("budget_count", 0)
             if mode == "off":
                 summary["off"] += g["requests"]
             elif mode == "auto":
@@ -273,6 +304,9 @@ class MultiAgentMetrics:
                     "decision_counts": {},
                     "fallback_counts": {},
                     "partial_count": 0,
+                    "router_counts": {},
+                    "deadline_count": 0,
+                    "budget_count": 0,
                     "latency_samples": [],
                     "llm_samples": [],
                     "token_samples": [],
@@ -296,6 +330,10 @@ class MultiAgentMetrics:
                 m["fallback_counts"][g["fallback"]] = (
                     m["fallback_counts"].get(g["fallback"], 0) + g["requests"]
                 )
+            for router, count in (g.get("router_counts") or {}).items():
+                m["router_counts"][router] = m["router_counts"].get(router, 0) + count
+            m["deadline_count"] += g.get("deadline_count", 0)
+            m["budget_count"] += g.get("budget_count", 0)
             for key, target in (
                 ("latency_ms", "latency_samples"),
                 ("llm_calls", "llm_samples"),
@@ -338,6 +376,18 @@ class MultiAgentMetrics:
             m["llm_calls"] = merge(m.pop("llm_samples"))
             m["tokens"] = merge(m.pop("token_samples"))
             m["n"] = m["requests"]  # 与在线聚合的 by_mode 字段名对齐
+            router_total = sum(
+                count
+                for router, count in m["router_counts"].items()
+                if router in ("rules", "llm", "llm_fallback")
+            )
+            m["routing_llm_rate"] = _rate(
+                m["router_counts"].get("llm", 0)
+                + m["router_counts"].get("llm_fallback", 0),
+                router_total,
+            )
+            m["deadline_rate"] = _rate(m["deadline_count"], m["activated"])
+            m["budget_rate"] = _rate(m["budget_count"], m["activated"])
             denom = m["activated"] + m["declined"]
             m["activated_rate"] = _rate(m["activated"], denom) if denom else 0.0
             m["partial_rate"] = _rate(m["partial_count"], m["activated"])
@@ -364,6 +414,21 @@ class MultiAgentMetrics:
             m["sources"]["no_source_rate"] = _rate(
                 m["sources"]["no_source"], m["sources"]["answered"]
             )
+
+        router_total = sum(
+            count
+            for router, count in summary["router_counts"].items()
+            if router in ("rules", "llm", "llm_fallback")
+        )
+        summary["routing_llm_rate"] = _rate(
+            summary["router_counts"].get("llm", 0)
+            + summary["router_counts"].get("llm_fallback", 0),
+            router_total,
+        )
+        summary["deadline_rate"] = _rate(
+            summary["deadline_count"], activated_total
+        )
+        summary["budget_rate"] = _rate(summary["budget_count"], activated_total)
 
         # 稳定输出：始终带 off/auto/on，unknown 只在有样本时出现。
         ordered = {mode: by_mode[mode] for mode in ("off", "auto", "on") if mode in by_mode}

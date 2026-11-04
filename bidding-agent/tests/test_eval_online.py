@@ -43,6 +43,9 @@ def _ma(
     route: list | None = None,
     configured: str = "auto",
     reason: str = "active",
+    router: str = "rules",
+    deadline: bool = False,
+    budget: bool = False,
 ) -> dict:
     return {
         "mode": mode,
@@ -51,8 +54,11 @@ def _ma(
         "activated": activated,
         "decision": decision,
         "route": route if route is not None else (["data", "retrieval"] if activated else []),
+        "router": router,
         "fallback": fallback,
         "partial": partial,
+        "deadline_exceeded": deadline,
+        "budget_exhausted": budget,
     }
 
 
@@ -205,6 +211,16 @@ class TestEvaluate:
         assert isinstance(row["ts"], float) and row["ts"] > 0
         assert row["verify_checked"] is True
         assert row["llm_trace_present"] is True
+
+    def test_multi_agent_router_deadline_budget_extracted(self):
+        row = evaluate({}, _done(multi_agent=_ma(
+            router="llm",
+            deadline=True,
+            budget=True,
+        )), question="统计中标金额并分析供应商关系")
+        assert row["multi_agent_router"] == "llm"
+        assert row["multi_agent_deadline_exceeded"] is True
+        assert row["multi_agent_budget_exhausted"] is True
 
     def test_multi_agent_absent_is_none(self):
         row = evaluate({}, _done(), question="投标保证金上限是多少？")
@@ -585,6 +601,26 @@ class TestAggregate:
         assert ma["mode_counts"]["off"] == 0
         assert ma["activated_rate"] is None
         assert "unknown" in ma["by_mode"]
+
+    def test_router_deadline_budget_rates(self):
+        rows = [
+            evaluate({}, _done(multi_agent=_ma(router="rules")), question="统计中标金额并分析供应商关系"),
+            evaluate({}, _done(multi_agent=_ma(router="llm", deadline=True)), question="最近的中标项目金额和供应商情况"),
+            evaluate({}, _done(multi_agent=_ma(router="llm_fallback", budget=True)), question="供应商关系图谱和地区分布"),
+        ]
+        ma = summarize_rows(rows)["multi_agent"]
+        assert ma["router_counts"]["rules"] == 1
+        assert ma["router_counts"]["llm"] == 1
+        assert ma["router_counts"]["llm_fallback"] == 1
+        assert ma["routing_llm_rate"] == 0.6667
+        assert ma["deadline_count"] == 1
+        assert ma["deadline_samples"] == 3
+        assert ma["deadline_rate"] == 0.3333
+        assert ma["budget_count"] == 1
+        assert ma["budget_rate"] == 0.3333
+        assert ma["by_mode"]["auto"]["routing_llm_rate"] == 0.6667
+        assert ma["by_mode"]["auto"]["deadline_rate"] == 0.3333
+        assert ma["by_mode"]["auto"]["budget_rate"] == 0.3333
 
     def test_sample_window(self):
         rows = self._rows_for_multi_agent()
