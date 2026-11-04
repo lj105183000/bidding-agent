@@ -224,6 +224,7 @@ curl -s "http://127.0.0.1:8001/api/eval/online?limit=2000" | jq '.multi_agent'
 | `bidding-agent/docs/并行开发协作.md` | 多 Agent 并行开发：所有权/契约/共享资源/合并流程 |
 | `bidding-agent/docs/增加Agent功能.md` | 二期功能清单（历史参考；多 Agent 等已落地） |
 | `CONTRIBUTING.md` | 贡献流程：环境、分支/PR、测试、代码风格、评测与安全约定 |
+| `CODE_OF_CONDUCT.md` | 社区行为准则（Contributor Covenant 2.1） |
 | `CLAUDE.md` / `AGENTS.md` | AI 编码助手工作指引（架构约定、契约红线、测试约定） |
 
 ## License
