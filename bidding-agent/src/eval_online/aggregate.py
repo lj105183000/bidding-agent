@@ -142,6 +142,159 @@ def _percentile(sorted_vals: list[float], pct: float) -> float:
     return sorted_vals[k - 1]
 
 
+_MODES = ("off", "auto", "on", "unknown")
+_DECISIONS = (
+    "off",
+    "activated",
+    "declined_short",
+    "declined_single_expert",
+    "declined_no_tasks",
+    "declined_error",
+    "unknown",
+)
+_REASONS = ("active", "off", "invalid_env", "langgraph_unavailable", "unknown")
+_FALLBACKS = ("none", "legacy", "fragment", "unknown")
+
+
+def _counts(rows: list[dict], key: str, allowed: tuple[str, ...]) -> dict[str, int]:
+    out = {name: 0 for name in allowed}
+    for r in rows:
+        value = str(r.get(key) or "unknown")
+        out[value if value in out else "unknown"] += 1
+    return out
+
+
+def _llm_call_vals(rows: list[dict]) -> list[float]:
+    """LLM 调用次数；旧行没有 llm_trace_present 时只保留 >0 的值。
+
+    旧样本的 `llm_calls=0` 可能是"真的没调"也可能是"当时没记"，
+    无法区分，故不把 0 计入均值（避免把缺失当 0）。
+    """
+    out: list[float] = []
+    for r in rows:
+        present = r.get("llm_trace_present")
+        value = r.get("llm_calls")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if present is False:
+            continue
+        if present is True or float(value) > 0:
+            out.append(float(value))
+    return out
+
+
+def _multi_agent_summary(rows: list[dict]) -> dict[str, Any]:
+    """多 Agent 灰度聚合；旧样本归 unknown，不参与激活率/fallback 分母。"""
+    mode_rows = {
+        mode: [
+            r
+            for r in rows
+            if str(r.get("multi_agent_mode") or "unknown") == mode
+        ]
+        for mode in _MODES
+    }
+    auto_on = [
+        r
+        for r in rows
+        if r.get("multi_agent_mode") in ("auto", "on")
+        and isinstance(r.get("multi_agent_activated"), bool)
+    ]
+    activated = [r for r in rows if r.get("multi_agent_activated") is True]
+    partial_rows = [
+        r for r in activated if isinstance(r.get("multi_agent_partial"), bool)
+    ]
+    route_sizes = [
+        float(r["multi_agent_route_size"])
+        for r in rows
+        if isinstance(r.get("multi_agent_route_size"), (int, float))
+        and not isinstance(r.get("multi_agent_route_size"), bool)
+    ]
+    ts = [
+        float(r["ts"])
+        for r in rows
+        if isinstance(r.get("ts"), (int, float)) and not isinstance(r.get("ts"), bool)
+    ]
+
+    by_mode: dict[str, Any] = {}
+    for mode, group in mode_rows.items():
+        if not group:
+            continue
+        group_auto_on = [
+            r
+            for r in group
+            if r.get("multi_agent_mode") in ("auto", "on")
+            and isinstance(r.get("multi_agent_activated"), bool)
+        ]
+        group_activated = [
+            r for r in group if r.get("multi_agent_activated") is True
+        ]
+        group_partial = [
+            r
+            for r in group_activated
+            if isinstance(r.get("multi_agent_partial"), bool)
+        ]
+        verify_rows = [r for r in group if r.get("verify_checked") is True]
+        by_mode[mode] = {
+            "n": len(group),
+            "decision_counts": _counts(group, "multi_agent_decision", _DECISIONS),
+            "activated_rate": (
+                sum(1 for r in group_auto_on if r.get("multi_agent_activated"))
+                / len(group_auto_on)
+                if group_auto_on
+                else None
+            ),
+            "activated_samples": len(group_auto_on),
+            "fallback_counts": _counts(
+                group_activated, "multi_agent_fallback", _FALLBACKS
+            ),
+            "partial_rate": (
+                sum(1 for r in group_partial if r.get("multi_agent_partial"))
+                / len(group_partial)
+                if group_partial
+                else None
+            ),
+            "partial_samples": len(group_partial),
+            "duration_ms": _stat(_vals(group, "duration_ms")),
+            "llm_ms": _stat(_vals(group, "llm_ms")),
+            "llm_calls": _stat(_llm_call_vals(group)),
+            "tokens": _stat(_vals(group, "tokens")),
+            "verify_checked": len(verify_rows),
+            "verify_ok_rate": _rate(verify_rows, "verify_ok"),
+            "verify_critical_ok_rate": _rate(verify_rows, "verify_critical_ok"),
+            "no_source_rate": _rate(group, "no_source"),
+        }
+
+    return {
+        "mode_counts": _counts(rows, "multi_agent_mode", _MODES),
+        "configured_mode_counts": _counts(
+            rows, "multi_agent_configured_mode", _MODES
+        ),
+        "mode_reason_counts": _counts(rows, "multi_agent_mode_reason", _REASONS),
+        "decision_counts": _counts(rows, "multi_agent_decision", _DECISIONS),
+        "activated_rate": (
+            sum(1 for r in auto_on if r.get("multi_agent_activated")) / len(auto_on)
+            if auto_on
+            else None
+        ),
+        "activated_samples": len(auto_on),
+        "partial_rate": (
+            sum(1 for r in partial_rows if r.get("multi_agent_partial"))
+            / len(partial_rows)
+            if partial_rows
+            else None
+        ),
+        "partial_samples": len(partial_rows),
+        "fallback_counts": _counts(activated, "multi_agent_fallback", _FALLBACKS),
+        "route_size": _stat(route_sizes),
+        "by_mode": by_mode,
+        "sample_window": {
+            "with_ts": len(ts),
+            "oldest": min(ts) if ts else None,
+            "latest": max(ts) if ts else None,
+        },
+    }
+
+
 def summarize_rows(rows: list[dict]) -> dict[str, Any]:
     """把样本聚合成一份视图。"""
     total = len(rows)
@@ -172,6 +325,7 @@ def summarize_rows(rows: list[dict]) -> dict[str, Any]:
     faith_vals = _vals(usable, "faithfulness")
     rel_vals = _vals(usable, "relevancy")
     judge_failed = sum(1 for r in usable if r.get("judge_failed") is True)
+    llm_call_values = _llm_call_vals(usable)
 
     return {
         "sample_count": total,
@@ -281,6 +435,9 @@ def summarize_rows(rows: list[dict]) -> dict[str, Any]:
         "duration_ms": _stat(_vals(usable, "duration_ms")),
         "llm_ms": _stat(_vals(usable, "llm_ms")),
         "tokens": _stat(_vals(usable, "tokens")),
+        # 在线样本此前只存 llm_calls 不聚合；灰度需要看每模式调用成本。
+        "llm_calls": _stat(llm_call_values),
+        "llm_calls_total": int(sum(llm_call_values)),
         "llm_failed_calls_total": sum(
             int(r.get("llm_failed_calls") or 0) for r in usable
         ),
@@ -293,6 +450,9 @@ def summarize_rows(rows: list[dict]) -> dict[str, Any]:
         "feedback_count": len(fb),
         "feedback_up_rate": (fb_up / len(fb)) if fb else None,
 
+        # ---- 多 Agent 灰度（按 mode/decision/fallback 聚合）----
+        "multi_agent": _multi_agent_summary(usable),
+
         # ---- 分组（用于发现"某一类问题一直在失败"）----
         "by_turns": _group_by_turns(usable),
 
@@ -302,6 +462,10 @@ def summarize_rows(rows: list[dict]) -> dict[str, Any]:
             "verify_ok_rate 只反映『引用的法条/数字是否出现在检索结果里』，不判断答案对不对。",
             "feedback_up_rate 分母是『评价过的人数』，不是全部用户（多数人不评价）。",
             "relevance_* 依赖检索侧给的评分；未配置评分的来源不计入（故 n 可能小于样本数）。",
+            "多 Agent 口径：在线样本默认采样 20%；激活率/延迟是采样估计，全量计数看 /api/metrics。",
+            "旧样本没有 multi_agent 字段，计入 unknown，不参与激活率/fallback 分母。",
+            "verify_ok_rate 的分母只含实际跑了核对（verify_checked）的样本，不是全部样本。",
+            "服务重启后 /api/metrics 计数归零；在线样本跨重启保留。",
         ],
     }
 

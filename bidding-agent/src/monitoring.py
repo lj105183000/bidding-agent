@@ -665,6 +665,16 @@ def component_metrics(
     return out
 
 
+def _multi_agent_metrics() -> dict[str, Any]:
+    """多 Agent 灰度指标；导入/计算失败只降级这一块，不影响整个端点。"""
+    try:
+        from src.monitoring_multi_agent import multi_agent_snapshot
+
+        return multi_agent_snapshot()
+    except Exception as exc:  # noqa: BLE001 - 观测不能搞挂 /api/metrics
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 def build_metrics(
     agent: Any = None,
     limiters: dict[str, Any] | None = None,
@@ -678,6 +688,8 @@ def build_metrics(
         # ★ 阶段耗时聚合（局限 6）。空 dict 表示还没记录过问答 ——
         #   前端据此显示暂无数据而不是画一条 0 线。
         "phases": phase_metrics(),
+        # 多 Agent 灰度：按 mode/decision/fallback 聚合，全流量（非采样）。
+        "multi_agent": _multi_agent_metrics(),
     }
 
 
@@ -775,5 +787,128 @@ def render_prometheus(
              [("", float(counters.get("captured_chars", 0)))])
         emit("bidding_langfuse_redactions_total", "脱敏替换次数", "counter",
              [("", float(counters.get("redactions", 0)))])
+
+    # ---- 多 Agent 灰度（闭集标签，避免高基数）----
+    ma = data.get("multi_agent") or {}
+    groups = ma.get("groups") or []
+    if isinstance(groups, list) and groups:
+        def glabels(g: dict) -> str:
+            return (
+                f'{{mode="{g.get("mode", "unknown")}",'
+                f'decision="{g.get("decision", "unknown")}",'
+                f'fallback="{g.get("fallback", "unknown")}",'
+                f'partial="{str(bool(g.get("partial"))).lower()}"}}'
+            )
+
+        emit(
+            "bidding_multi_agent_requests_total",
+            "按模式/决策/降级累计请求数",
+            "counter",
+            [(glabels(g), float(g.get("requests", 0))) for g in groups],
+        )
+        latency = [g for g in groups if isinstance(g.get("latency_ms"), dict)]
+        emit(
+            "bidding_multi_agent_latency_p50_ms",
+            "多 Agent 延迟中位（毫秒）",
+            "gauge",
+            [(glabels(g), float(g["latency_ms"]["median"])) for g in latency],
+        )
+        emit(
+            "bidding_multi_agent_latency_p95_ms",
+            "多 Agent 延迟 P95（毫秒）",
+            "gauge",
+            [(glabels(g), float(g["latency_ms"]["p95"])) for g in latency],
+        )
+        llm = [g for g in groups if isinstance(g.get("llm_calls"), dict)]
+        emit(
+            "bidding_multi_agent_llm_calls_mean",
+            "平均 LLM 调用次数",
+            "gauge",
+            [(glabels(g), float(g["llm_calls"]["mean"])) for g in llm],
+        )
+        emit(
+            "bidding_multi_agent_llm_calls_total",
+            "累计 LLM 调用次数",
+            "counter",
+            [(glabels(g), float(g["llm_calls"].get("total", 0))) for g in llm],
+        )
+        tokens = [g for g in groups if isinstance(g.get("tokens"), dict)]
+        emit(
+            "bidding_multi_agent_tokens_total",
+            "累计 token 用量",
+            "counter",
+            [(glabels(g), float(g["tokens"].get("total", 0))) for g in tokens],
+        )
+        ver = [g for g in groups if isinstance(g.get("verification"), dict)]
+        emit(
+            "bidding_multi_agent_verify_ok_ratio",
+            "答案核对通过率（仅实际核对样本）",
+            "gauge",
+            [
+                (glabels(g), float(g["verification"]["ok_rate"]))
+                for g in ver
+                if g["verification"].get("ok_rate") is not None
+            ],
+        )
+        emit(
+            "bidding_multi_agent_verify_critical_ok_ratio",
+            "严重核对通过率（仅实际核对样本）",
+            "gauge",
+            [
+                (glabels(g), float(g["verification"]["critical_ok_rate"]))
+                for g in ver
+                if g["verification"].get("critical_ok_rate") is not None
+            ],
+        )
+        emit(
+            "bidding_multi_agent_no_source_ratio",
+            "无来源答案比例（排除追问）",
+            "gauge",
+            [
+                (glabels(g), float(g["sources"]["no_source_rate"]))
+                for g in groups
+                if isinstance(g.get("sources"), dict)
+                and g["sources"].get("no_source_rate") is not None
+            ],
+        )
+
+    configured_reasons = ma.get("configured_reason_counts") or []
+    emit(
+        "bidding_multi_agent_configured_requests_total",
+        "按配置模式/生效原因累计请求数",
+        "counter",
+        [
+            (
+                f'{{mode="{row.get("mode", "unknown")}",'
+                f'reason="{row.get("reason", "unknown")}"}}',
+                float(row.get("requests", 0)),
+            )
+            for row in configured_reasons
+            if isinstance(row, dict)
+        ],
+    )
+
+    by_mode = ma.get("by_mode") or {}
+    if isinstance(by_mode, dict):
+        emit(
+            "bidding_multi_agent_activated_ratio",
+            "按有效模式的激活率",
+            "gauge",
+            [
+                (f'{{mode="{mode}"}}', float(stats["activated_rate"]))
+                for mode, stats in by_mode.items()
+                if isinstance(stats, dict) and stats.get("activated_rate") is not None
+            ],
+        )
+        emit(
+            "bidding_multi_agent_partial_ratio",
+            "按有效模式的部分失败率（仅激活样本）",
+            "gauge",
+            [
+                (f'{{mode="{mode}"}}', float(stats["partial_rate"]))
+                for mode, stats in by_mode.items()
+                if isinstance(stats, dict) and stats.get("partial_rate") is not None
+            ],
+        )
 
     return "\n".join(lines) + "\n"

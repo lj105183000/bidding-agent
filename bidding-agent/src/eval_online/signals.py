@@ -36,6 +36,7 @@
 from __future__ import annotations
 
 import logging
+import time
 import statistics
 from typing import Any
 
@@ -132,6 +133,11 @@ def evaluate(meta: dict, done: dict, *, question: str = "", has_history: bool = 
             repeats[n] = repeats.get(n, 0) + 1
         providers = done.get("provider_chain") or []
         compaction = done.get("compaction") or {}
+        # 多 Agent 决策（additive；旧 done 帧没有该键 → None，聚合归 unknown）
+        ma = done.get("multi_agent")
+        ma = ma if isinstance(ma, dict) else None
+        ma_route = [str(x) for x in (ma.get("route") or []) if x] if ma else None
+        verification_raw = done.get("verification")
 
         return {
             # ---- 检索质量 ----
@@ -201,6 +207,39 @@ def evaluate(meta: dict, done: dict, *, question: str = "", has_history: bool = 
             "no_source": len(sources) == 0 and len(web_sources) == 0,
             #: 是否实际调了工具
             "tool_called": bool(done.get("tool_called")),
+
+            # ---- 多 Agent 决策（灰度可观测）----
+            #: 采样时间戳。旧样本没有该字段，聚合时按"无时间窗"处理。
+            "ts": time.time(),
+            "multi_agent_mode": str(ma["mode"]) if ma and ma.get("mode") else None,
+            "multi_agent_configured_mode": (
+                str(ma["configured_mode"])
+                if ma and ma.get("configured_mode")
+                else None
+            ),
+            "multi_agent_mode_reason": (
+                str(ma["mode_reason"]) if ma and ma.get("mode_reason") else None
+            ),
+            "multi_agent_activated": (
+                bool(ma["activated"]) if ma and "activated" in ma else None
+            ),
+            "multi_agent_decision": (
+                str(ma["decision"]) if ma and ma.get("decision") else None
+            ),
+            "multi_agent_fallback": (
+                str(ma["fallback"]) if ma and ma.get("fallback") else None
+            ),
+            "multi_agent_partial": (
+                bool(ma["partial"]) if ma and "partial" in ma else None
+            ),
+            #: 路由明细（仅用于人工排查；不在聚合里按 agent 拆标签）
+            "multi_agent_route": ma_route,
+            "multi_agent_route_size": len(ma_route) if ma_route is not None else None,
+            #: 是否实际跑了核对 —— verify_ok_rate 的分母必须用它，而不是样本总数
+            "verify_checked": isinstance(verification_raw, dict)
+            and bool(verification_raw),
+            #: llm_trace 是否存在（旧行没有该字段时，llm_calls=0 不代表真的 0 次）
+            "llm_trace_present": bool(llm),
 
             # ---- 延迟与成本 ----
             "duration_ms": duration,

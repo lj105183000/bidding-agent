@@ -647,6 +647,19 @@ class BiddingAgent(ReActMixin, GenerationMixin, ToolDefenseMixin):
             "compaction": None,
             # 本轮召回的历史示例（供 done 帧展示"为什么这么答"）
             "memory_examples": [],
+            # 多 Agent 决策的默认值：即使请求在预路由前失败，done 帧也带
+            # 一个合法结构（decision=declined_error 由异常分支覆盖）。
+            # 实际模式/原因在下面的预路由块里填充。
+            "multi_agent": {
+                "mode": "off",
+                "configured_mode": "off",
+                "mode_reason": "off",
+                "activated": False,
+                "decision": "off",
+                "route": [],
+                "fallback": "none",
+                "partial": False,
+            },
         }
         yield "status", "正在初始化..."
 
@@ -732,12 +745,22 @@ class BiddingAgent(ReActMixin, GenerationMixin, ToolDefenseMixin):
             # reset 事件（防泄漏清空重来）也经过这里，在此累积能保证
             # 攒到的就是**用户最终看到的那份**，与前端语义一致。
             # 多 Agent 预路由：默认 off；auto/on 且问题适合时才走图。
+            #
+            # ★ 这里同时产出 `meta["multi_agent"]`：它回答"配置了什么、
+            #   实际生效什么、为什么走/没走图"。只看 done.orchestration 时
+            #   off 与 auto 被拒都是 null，灰度时无法区分。
             multi_run = None
             try:
-                from src.agent.orchestration.mode import multi_agent_mode
+                from src.agent.orchestration.mode import multi_agent_mode_detail
 
-                mode = multi_agent_mode()
-                if mode != "off":
+                detail = multi_agent_mode_detail()
+                mode_info = meta["multi_agent"]
+                mode_info.update(
+                    mode=detail["effective"],
+                    configured_mode=detail["configured"],
+                    mode_reason=detail["reason"],
+                )
+                if mode_info["mode"] != "off":
                     # 只在开启时 import runtime/graph，避免 off 路径加载编排包。
                     from src.agent.orchestration.runtime import prepare_multi_agent
 
@@ -745,11 +768,17 @@ class BiddingAgent(ReActMixin, GenerationMixin, ToolDefenseMixin):
                         question,
                         web_enabled=web_search_enabled,
                         skills=self.skills,
-                        mode=mode,
+                        mode=mode_info["mode"],
+                        decision=mode_info,
                     )
             except Exception:  # noqa: BLE001 - 多 Agent 是增强路径，失败回退旧 ReAct
                 logger.exception("多 Agent 预路由失败，回退旧 ReAct")
                 multi_run = None
+                current = meta.get("multi_agent")
+                if isinstance(current, dict):
+                    current.update(
+                        activated=False, decision="declined_error", route=[]
+                    )
 
             if multi_run is not None:
                 stream = self._chat_stream_multi_agent(
@@ -910,7 +939,7 @@ class BiddingAgent(ReActMixin, GenerationMixin, ToolDefenseMixin):
             # 本轮**没有回答**。硬跑会得出"无依据"这类结论写进 done 帧，
             # 属于凭空生成的质量判定。
             self._sync_provider_meta(meta, locals().get("client"))
-            done = self._build_done(meta, t_start)
+            done = self._build_done(meta, t_start, clarified=True)
             # 显式标记，便于前端区分"追问结束"与"正常答完"
             done["clarified"] = True
             yield "done", done
@@ -1056,12 +1085,14 @@ class BiddingAgent(ReActMixin, GenerationMixin, ToolDefenseMixin):
         )
 
     @staticmethod
-    def _build_done(meta: dict, t_start: float) -> dict:
+    def _build_done(meta: dict, t_start: float, *, clarified: bool = False) -> dict:
         """组装 done 帧（契约见开发文档 §6.4，字段结构与 tool_name 单字符串语义勿改）。
 
         `_meta` 是**内部传递用**的私有键：`chat()` 取出它做答案核对后立即 pop 掉，
         不会出现在对外返回里。挂在这里是因为这是 meta 最后一次可用之处，
         而核对需要 meta 里的工具结果文本与成功工具集合。
+
+        `clarified=True` 时只记录"这是一次追问"，不把空答案计入质量分母。
         """
         # ★ 把阶段耗时喂给监控聚合（局限 6）
         #
@@ -1078,7 +1109,7 @@ class BiddingAgent(ReActMixin, GenerationMixin, ToolDefenseMixin):
         except Exception:  # noqa: BLE001 - 观测不能影响问答
             pass
 
-        return {
+        done = {
             "sources": meta["sources"],
             "web_sources": meta["web_sources"],
             "tool_called": meta["tool_called"],
@@ -1183,12 +1214,37 @@ class BiddingAgent(ReActMixin, GenerationMixin, ToolDefenseMixin):
             "orchestration": meta.get("orchestration"),
             "agent_trace": meta.get("agent_trace") or [],
             "agent_timings": meta.get("agent_timings") or [],
+            # 多 Agent 决策记录：distinguishes off / auto-declined / activated。
+            # 具体值在下面从 meta 展开；这里先占位保证字段恒存在。
+            "multi_agent": None,
             "provider": meta.get("llm_provider") or "",
             "provider_chain": meta.get("llm_provider_chain") or [],
             "provider_switch_count": meta.get("llm_provider_switches") or 0,
             "provider_errors": meta.get("llm_provider_errors") or [],
             "_meta": meta,
         }
+        # 展开多 Agent 决策；`fallback/partial` 以最终 orchestration 为准
+        # （graph/core 的 legacy/fragment 是在流结束后才写进 meta 的）。
+        ma = meta.get("multi_agent")
+        if isinstance(ma, dict):
+            ma = dict(ma)
+            orch = meta.get("orchestration")
+            if ma.get("activated") and isinstance(orch, dict):
+                ma["fallback"] = str(orch.get("fallback") or "none")
+                ma["partial"] = bool(orch.get("partial"))
+            done["multi_agent"] = ma
+
+        # 全流量进程内指标只在这里记一次；clarify 也记，但不计入质量分母。
+        # 观测失败绝不能影响问答，故整段吞异常。
+        try:
+            from src.monitoring_multi_agent import record_done
+
+            if not meta.get("_multi_agent_recorded"):
+                meta["_multi_agent_recorded"] = True
+                record_done(done, clarified=clarified)
+        except Exception:  # noqa: BLE001 - 观测不能影响问答
+            pass
+        return done
 
     def _verify_final_answer(self, answer: str, meta: dict) -> dict | None:
         """对最终答案做零延迟核对，结果写回 meta 并返回。
