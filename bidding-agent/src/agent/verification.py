@@ -602,10 +602,12 @@ def check_tool_availability_claims(
     return conflicts
 
 
-def check_citations(answer: str, tool_text: str) -> CheckResult:
+def check_citations(answer: str, tool_text: str, question: str = "") -> CheckResult:
     """核对答案里的法规引用与数字是否有工具结果支撑。
 
     `tool_text` 是所有工具结果拼成的文本（即模型生成时能看到的那部分）。
+    `question` 是用户原问题：答案**复述用户提供的数字**（如"质保金 10%"）
+    属于有依据，不能因为工具没回显条款原文就判成编造。
     只把**完全找不到**的记为未支持；能找到的（含去空白后匹配）视为有依据。
 
     ★ 为什么只报"找不到"而不判断"找得对不对"
@@ -622,7 +624,10 @@ def check_citations(answer: str, tool_text: str) -> CheckResult:
     # 因为去空格会把相邻数字粘成一个（实测 `2500.00 1700.00` → `2500.001700.00`，
     # 三个金额变成一个数，换算结果全错）。
     # 故先把换算结果算出来，再连同原文一起归一化。
-    raw = tool_text or ""
+    #
+    # 用户问题同样算依据：合规题常把条款原文放进问题里，工具只回
+    # "未命中规则"，若不复述问题就把用户自己给的数字判成编造（评测实测 #15）。
+    raw = f"{question}\n{tool_text}" if question else (tool_text or "")
     extra_yuan = "".join(_yuan_conversions(raw))
     # ⚠️ 拼接时必须加分隔符。
     # 直接 `raw + extra_yuan` 会让末尾数字与换算结果粘在一起——
@@ -674,9 +679,10 @@ def verify_answer(
     answer: str,
     tool_text: str = "",
     succeeded_tools: list[str] | set[str] | None = None,
+    question: str = "",
 ) -> CheckResult:
     """完整核对：引用 + 工具可用性。零延迟、不调 LLM。"""
-    result = check_citations(answer, tool_text)
+    result = check_citations(answer, tool_text, question=question)
     result.false_unavailable_claims = check_tool_availability_claims(
         answer, succeeded_tools or []
     )

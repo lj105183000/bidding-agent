@@ -663,6 +663,8 @@ METRIC_SPECS: dict[str, MetricSpec] = {
         rationale=(
             "与 agent 线同口径：条款号/数字编造必须接近零。"
             "多 Agent 合并了所有专家 tool_output_text，核对不应因此变松。"
+            "数据统计题的派生数字（均值/占比）可在用例里用 `verify_numbers: false` 豁免；"
+            "条款号/法规名不豁免。"
         ),
     ),
     "agent_multi.verification_ok_rate": MetricSpec(

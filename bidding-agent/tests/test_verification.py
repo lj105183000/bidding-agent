@@ -283,6 +283,25 @@ class TestCitationCheck:
     def test_empty_answer_is_ok(self):
         assert V.check_citations("", "随便什么").ok
 
+    def test_question_counts_as_support(self):
+        """答案复述用户问题里的数字，不算编造（实测合规题 #15）。"""
+        question = "合同条款约定质保金 10%，依据哪条法规？"
+        r = V.check_citations(
+            "合同条款约定质保金 10%，工具未命中相关规则。",
+            "未命中规则库",
+            question=question,
+        )
+        assert r.unsupported_numbers == [], r.summary()
+
+    def test_question_does_not_mask_new_numbers(self):
+        """只认用户问题里出现过的数字，新编的数字仍要报。"""
+        r = V.check_citations(
+            "质保金 10%，另需缴纳 3% 服务费。",
+            "未命中规则库",
+            question="合同条款约定质保金 10%，依据哪条法规？",
+        )
+        assert "3%" in r.unsupported_numbers
+
 
     def test_ok_property_and_summary(self):
         r = V.CheckResult()

@@ -77,6 +77,7 @@ def test_compliance_error_is_runtime_error():
         "投标人须在本市设有分支机构并提供本地办公场所证明。",
         "供应商必须在本地注册并缴纳社保。",
         "投标人应具有本地业绩不少于 2 个。",
+        "评标办法中规定本地企业加 2 分。",
     ],
 )
 def test_local_requirement_detected(clause):
