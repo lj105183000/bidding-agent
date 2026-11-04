@@ -33,6 +33,29 @@ from src.eval_online.recorder import OnlineEvaluator
 from src.eval_online.signals import evaluate, is_evaluable
 
 
+def _ma(
+    *,
+    mode: str = "auto",
+    decision: str = "activated",
+    activated: bool = True,
+    fallback: str = "none",
+    partial: bool = False,
+    route: list | None = None,
+    configured: str = "auto",
+    reason: str = "active",
+) -> dict:
+    return {
+        "mode": mode,
+        "configured_mode": configured,
+        "mode_reason": reason,
+        "activated": activated,
+        "decision": decision,
+        "route": route if route is not None else (["data", "retrieval"] if activated else []),
+        "fallback": fallback,
+        "partial": partial,
+    }
+
+
 def _done(**over) -> dict:
     """构造一个"正常答完"的 done 帧。"""
     base = {
@@ -158,6 +181,41 @@ class TestEvaluate:
         row = evaluate({}, _done(), question="一二三四五", has_history=True)
         assert row["question_chars"] == 5
         assert row["has_history"] is True
+
+    def test_multi_agent_fields_extracted(self):
+        row = evaluate({}, _done(multi_agent={
+            "mode": "auto",
+            "configured_mode": "auto",
+            "mode_reason": "active",
+            "activated": True,
+            "decision": "activated",
+            "route": ["data", "retrieval"],
+            "fallback": "none",
+            "partial": False,
+        }), question="统计中标金额并分析供应商关系")
+        assert row["multi_agent_mode"] == "auto"
+        assert row["multi_agent_configured_mode"] == "auto"
+        assert row["multi_agent_mode_reason"] == "active"
+        assert row["multi_agent_activated"] is True
+        assert row["multi_agent_decision"] == "activated"
+        assert row["multi_agent_fallback"] == "none"
+        assert row["multi_agent_partial"] is False
+        assert row["multi_agent_route"] == ["data", "retrieval"]
+        assert row["multi_agent_route_size"] == 2
+        assert isinstance(row["ts"], float) and row["ts"] > 0
+        assert row["verify_checked"] is True
+        assert row["llm_trace_present"] is True
+
+    def test_multi_agent_absent_is_none(self):
+        row = evaluate({}, _done(), question="投标保证金上限是多少？")
+        assert row["multi_agent_mode"] is None
+        assert row["multi_agent_activated"] is None
+        assert row["multi_agent_route"] is None
+        assert row["multi_agent_route_size"] is None
+
+    def test_verify_checked_false_without_verification(self):
+        row = evaluate({}, _done(verification=None), question="投标保证金上限是多少？")
+        assert row["verify_checked"] is False
 
 
 class TestIsEvaluable:
@@ -429,6 +487,112 @@ class TestAggregate:
         joined = " ".join(caveats)
         assert "参考答案" in joined
         assert "verify_ok_rate" in joined
+        assert "multi_agent" in joined
+
+    def _rows_for_multi_agent(self) -> list[dict]:
+        return [
+            evaluate({}, _done(multi_agent=_ma()), question="统计中标金额并分析供应商关系"),
+            evaluate(
+                {},
+                _done(multi_agent=_ma(
+                    decision="declined_single_expert",
+                    activated=False,
+                    route=[],
+                )),
+                question="公开招标和邀请招标有什么区别？",
+            ),
+            evaluate(
+                {},
+                _done(multi_agent=_ma(mode="off", decision="off", activated=False, configured="off", reason="off", route=[])),
+                question="投标保证金上限是多少？",
+            ),
+        ]
+
+    def test_multi_agent_mode_and_decision_counts(self):
+        ma = summarize_rows(self._rows_for_multi_agent())["multi_agent"]
+        assert ma["mode_counts"]["auto"] == 2
+        assert ma["mode_counts"]["off"] == 1
+        assert ma["decision_counts"]["activated"] == 1
+        assert ma["decision_counts"]["declined_single_expert"] == 1
+        assert ma["decision_counts"]["off"] == 1
+
+    def test_activated_rate_excludes_off_and_unknown(self):
+        ma = summarize_rows(self._rows_for_multi_agent())["multi_agent"]
+        assert ma["activated_samples"] == 2
+        assert ma["activated_rate"] == 0.5
+        # off 不进激活率分母
+        assert ma["by_mode"]["off"]["activated_rate"] is None
+
+    def test_fallback_and_partial_only_activated(self):
+        rows = [
+            evaluate({}, _done(multi_agent=_ma(fallback="legacy", partial=True)), question="统计中标金额并分析供应商关系"),
+            evaluate(
+                {},
+                _done(multi_agent=_ma(
+                    decision="declined_single_expert",
+                    activated=False,
+                    fallback="legacy",
+                    route=[],
+                )),
+                question="公开招标和邀请招标有什么区别？",
+            ),
+        ]
+        ma = summarize_rows(rows)["multi_agent"]
+        assert ma["fallback_counts"] == {"none": 0, "legacy": 1, "fragment": 0, "unknown": 0}
+        assert ma["partial_rate"] == 1.0
+        assert ma["by_mode"]["auto"]["fallback_counts"] == {
+            "none": 0,
+            "legacy": 1,
+            "fragment": 0,
+            "unknown": 0,
+        }
+
+    def test_per_mode_latency_and_llm_calls(self):
+        rows = [
+            evaluate({}, _done(multi_agent=_ma(), elapsed_ms=1000), question="统计中标金额并分析供应商关系"),
+            evaluate({}, _done(multi_agent=_ma(), elapsed_ms=3000), question="最近的中标项目金额和供应商情况"),
+        ]
+        ma = summarize_rows(rows)["multi_agent"]
+        auto = ma["by_mode"]["auto"]
+        assert auto["n"] == 2
+        assert auto["duration_ms"]["mean"] == 2000.0
+        assert auto["llm_calls"]["n"] == 2
+        assert ma["route_size"]["median"] == 2.0
+
+    def test_llm_calls_exposed_overall(self):
+        rows = [
+            evaluate({}, _done(multi_agent=_ma(), llm_trace={"call_count": 2, "total_tokens": 100}), question="统计中标金额并分析供应商关系"),
+            evaluate({}, _done(multi_agent=_ma(), llm_trace={"call_count": 4, "total_tokens": 200}), question="最近的中标项目金额和供应商情况"),
+        ]
+        s = summarize_rows(rows)
+        assert s["llm_calls"]["mean"] == 3.0
+        assert s["llm_calls_total"] == 6
+
+    def test_verify_rates_use_checked_denominator(self):
+        rows = [
+            evaluate({}, _done(multi_agent=_ma(), verification={"ok": True, "critical_ok": True}), question="统计中标金额并分析供应商关系"),
+            evaluate({}, _done(multi_agent=_ma(), verification=None), question="最近的中标项目金额和供应商情况"),
+        ]
+        auto = summarize_rows(rows)["multi_agent"]["by_mode"]["auto"]
+        assert auto["verify_checked"] == 1
+        assert auto["verify_ok_rate"] == 1.0
+        assert auto["verify_critical_ok_rate"] == 1.0
+
+    def test_old_rows_grouped_as_unknown(self):
+        old = {"clarified": False, "question_chars": 10, "no_source": False, "duration_ms": 1000}
+        ma = summarize_rows([old])["multi_agent"]
+        assert ma["mode_counts"]["unknown"] == 1
+        assert ma["mode_counts"]["off"] == 0
+        assert ma["activated_rate"] is None
+        assert "unknown" in ma["by_mode"]
+
+    def test_sample_window(self):
+        rows = self._rows_for_multi_agent()
+        window = summarize_rows(rows)["multi_agent"]["sample_window"]
+        assert window["with_ts"] == 3
+        assert window["oldest"] is not None
+        assert window["latest"] is not None
+        assert window["oldest"] <= window["latest"]
 
 
 # ===========================================================================

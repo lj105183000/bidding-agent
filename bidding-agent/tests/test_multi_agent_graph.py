@@ -125,6 +125,14 @@ def test_multi_agent_graph_end_to_end(monkeypatch):
     assert done["orchestration"]["enabled"] is True
     assert done["orchestration"]["route"] == ["data", "retrieval"]
     assert done["orchestration"]["fallback"] == "none"
+    ma = done["multi_agent"]
+    assert ma["mode"] == "on"
+    assert ma["configured_mode"] == "on"
+    assert ma["activated"] is True
+    assert ma["decision"] == "activated"
+    assert ma["route"] == ["data", "retrieval"]
+    assert ma["fallback"] == "none"
+    assert ma["partial"] is False
     assert [item["agent"] for item in done["agent_trace"]] == ["data", "retrieval"]
     assert all(item["status"] == "ok" for item in done["agent_trace"])
     phases = [item[0] for item in done["phase_times"]]
@@ -148,6 +156,28 @@ def test_auto_single_intent_uses_legacy_path(monkeypatch):
 
     assert done["agent_trace"] == []
     assert done["orchestration"] is None
+    assert done["multi_agent"]["mode"] == "auto"
+    assert done["multi_agent"]["decision"] == "declined_short"
+    assert done["multi_agent"]["activated"] is False
+    assert data.raw_calls == 0
+    assert retrieval.raw_calls == 0
+    assert synth.stream_calls == 0
+
+
+def test_auto_single_expert_records_declined_single_expert(monkeypatch):
+    _set_env(monkeypatch)
+    monkeypatch.setenv("AGENT_MULTI_AGENT", "auto")
+    agent, data, retrieval, synth = _build_agent(monkeypatch)
+
+    question = "公开招标和邀请招标有什么区别？"
+    events = list(agent._chat_events(question, web_search_enabled=False))
+    done = _done(events)
+
+    assert done["orchestration"] is None
+    assert done["multi_agent"]["mode"] == "auto"
+    assert done["multi_agent"]["decision"] == "declined_single_expert"
+    assert done["multi_agent"]["activated"] is False
+    assert done["multi_agent"]["route"] == ["retrieval"]
     assert data.raw_calls == 0
     assert retrieval.raw_calls == 0
     assert synth.stream_calls == 0
@@ -165,6 +195,9 @@ def test_flag_off_uses_legacy_path(monkeypatch):
 
     assert done["agent_trace"] == []
     assert done["orchestration"] is None
+    assert done["multi_agent"]["mode"] == "off"
+    assert done["multi_agent"]["configured_mode"] == "off"
+    assert done["multi_agent"]["decision"] == "off"
     assert data.raw_calls == 0
     assert retrieval.raw_calls == 0
     assert synth.stream_calls == 0

@@ -272,3 +272,108 @@ def test_conversation_endpoints_503_without_pg(monkeypatch):
         "/api/feedback",
         json={"session_id": "s1", "message_id": 1, "rating": "up"},
     ).status_code == 503
+
+
+def test_metrics_includes_multi_agent_json(monkeypatch):
+    from src.monitoring_multi_agent import record_done, reset_multi_agent_metrics
+
+    monkeypatch.setenv("LOG_API_KEY", "test-key")
+    reset_multi_agent_metrics()
+    try:
+        record_done({
+            "multi_agent": {
+                "mode": "auto",
+                "configured_mode": "auto",
+                "mode_reason": "active",
+                "activated": True,
+                "decision": "activated",
+                "route": ["data", "retrieval"],
+                "fallback": "none",
+                "partial": False,
+            },
+            "elapsed_ms": 1200,
+            "llm_trace": {"call_count": 4, "total_tokens": 2000},
+            "verification": {"ok": True, "critical_ok": True},
+            "sources": [{"id": 1}],
+            "web_sources": [],
+        })
+        client = TestClient(server.app)
+        resp = client.get(
+            "/api/metrics", headers={"X-API-Key": "test-key"}
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["multi_agent"]["summary"]["auto_activated"] == 1
+        assert data["multi_agent"]["by_mode"]["auto"]["requests"] == 1
+    finally:
+        reset_multi_agent_metrics()
+
+
+def test_metrics_prometheus_includes_multi_agent(monkeypatch):
+    from src.monitoring_multi_agent import record_done, reset_multi_agent_metrics
+
+    monkeypatch.setenv("LOG_API_KEY", "test-key")
+    reset_multi_agent_metrics()
+    try:
+        record_done({
+            "multi_agent": {
+                "mode": "auto",
+                "configured_mode": "auto",
+                "mode_reason": "active",
+                "activated": True,
+                "decision": "activated",
+                "route": ["data", "retrieval"],
+                "fallback": "none",
+                "partial": False,
+            },
+            "elapsed_ms": 1200,
+            "llm_trace": {"call_count": 4, "total_tokens": 2000},
+            "verification": {"ok": True, "critical_ok": True},
+            "sources": [{"id": 1}],
+            "web_sources": [],
+        })
+        client = TestClient(server.app)
+        resp = client.get(
+            "/api/metrics?format=prometheus", headers={"X-API-Key": "test-key"}
+        )
+        assert resp.status_code == 200
+        assert "bidding_multi_agent_requests_total" in resp.text
+        assert 'mode="auto"' in resp.text
+    finally:
+        reset_multi_agent_metrics()
+
+
+def test_online_eval_includes_multi_agent_aggregate(monkeypatch):
+    from src.eval_online import evaluator
+    from src.eval_online.signals import evaluate
+
+    row = evaluate(
+        {},
+        {
+            "sources": [{"relevance": 0.9}],
+            "web_sources": [],
+            "verification": {"ok": True, "critical_ok": True},
+            "llm_trace": {"call_count": 3, "total_tokens": 100},
+            "elapsed_ms": 1000,
+            "multi_agent": {
+                "mode": "auto",
+                "configured_mode": "auto",
+                "mode_reason": "active",
+                "activated": True,
+                "decision": "activated",
+                "route": ["data", "retrieval"],
+                "fallback": "none",
+                "partial": False,
+            },
+        },
+        question="统计中标金额并分析供应商关系",
+    )
+    monkeypatch.setattr(evaluator, "read_rows", lambda limit=2000: [row])
+    monkeypatch.setattr(evaluator, "snapshot", lambda: {"enabled": False})
+
+    client = TestClient(server.app)
+    resp = client.get("/api/eval/online")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["multi_agent"]["mode_counts"]["auto"] == 1
+    assert data["multi_agent"]["activated_rate"] == 1.0

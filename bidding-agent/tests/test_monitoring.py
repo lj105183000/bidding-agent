@@ -428,8 +428,15 @@ class TestComponentMetrics:
 class TestBuildMetrics:
     def test_shape(self):
         d = M.build_metrics(None, None)
-        assert set(d) >= {"collected_at", "requests", "system", "components"}
+        assert set(d) >= {
+            "collected_at",
+            "requests",
+            "system",
+            "components",
+            "multi_agent",
+        }
         assert "overall" in d["requests"]
+        assert "summary" in d["multi_agent"]
 
     def test_collected_at_is_iso_with_offset(self):
         """时间要带时区偏移（与结构化日志同一约定，便于人工读）。"""
@@ -471,6 +478,45 @@ class TestPrometheusFormat:
         t = self._text()
         types = [ln.split()[2] for ln in t.splitlines() if ln.startswith("# TYPE ")]
         assert len(types) == len(set(types)), "同一指标重复声明 TYPE"
+
+    def test_contains_multi_agent_metrics(self):
+        from src.monitoring_multi_agent import (
+            record_done,
+            reset_multi_agent_metrics,
+        )
+
+        reset_multi_agent_metrics()
+        try:
+            record_done(
+                {
+                    "multi_agent": {
+                        "mode": "auto",
+                        "configured_mode": "auto",
+                        "mode_reason": "active",
+                        "activated": True,
+                        "decision": "activated",
+                        "route": ["data", "retrieval"],
+                        "fallback": "none",
+                        "partial": False,
+                    },
+                    "elapsed_ms": 1200,
+                    "llm_trace": {"call_count": 4, "total_tokens": 2000},
+                    "verification": {"ok": True, "critical_ok": True},
+                    "sources": [{"id": 1}],
+                    "web_sources": [],
+                }
+            )
+            t = self._text()
+            assert "bidding_multi_agent_requests_total" in t
+            assert 'mode="auto"' in t
+            assert 'decision="activated"' in t
+            # TYPE 仍不能重复
+            types = [
+                ln.split()[2] for ln in t.splitlines() if ln.startswith("# TYPE ")
+            ]
+            assert len(types) == len(set(types))
+        finally:
+            reset_multi_agent_metrics()
 
     def test_ends_with_newline(self):
         assert self._text().endswith("\n")

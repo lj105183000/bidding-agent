@@ -1,7 +1,16 @@
 """多 Agent 确定性路由测试（零 LLM 调用）。"""
 
-from src.agent.orchestration.mode import multi_agent_mode
-from src.agent.orchestration.router import route_question, should_use_multi_agent
+from src.agent.orchestration.mode import multi_agent_mode, multi_agent_mode_detail
+from src.agent.orchestration.router import (
+    DECISION_ACTIVATED,
+    DECISION_NO_TASKS,
+    DECISION_OFF,
+    DECISION_SHORT,
+    DECISION_SINGLE_EXPERT,
+    multi_agent_decision,
+    route_question,
+    should_use_multi_agent,
+)
 
 
 def test_data_intent_routes_data_first():
@@ -62,3 +71,42 @@ def test_mode_on_when_langgraph_available(monkeypatch):
     monkeypatch.setenv("AGENT_MULTI_AGENT", "on")
     # 测试环境已安装 langgraph；若未安装，off 是预期的安全回退。
     assert multi_agent_mode() in ("on", "off")
+
+
+def test_decision_reasons_match_should_use():
+    multi = route_question("统计中标金额并分析供应商关系", web_enabled=False)
+    single = route_question("公开招标和邀请招标有什么区别？", web_enabled=False)
+
+    assert multi_agent_decision("统计中标金额并分析供应商关系", "auto", multi) == DECISION_ACTIVATED
+    assert multi_agent_decision("统计中标金额并分析供应商关系", "off", multi) == DECISION_OFF
+    assert multi_agent_decision("公开招标和邀请招标有什么区别？", "auto", single) == DECISION_SINGLE_EXPERT
+    assert multi_agent_decision("你好", "on", single) == DECISION_SHORT
+    assert multi_agent_decision("统计中标金额并分析供应商关系", "auto", []) == DECISION_NO_TASKS
+
+    for question, mode, tasks in (
+        ("统计中标金额并分析供应商关系", "auto", multi),
+        ("公开招标和邀请招标有什么区别？", "auto", single),
+        ("你好", "on", single),
+    ):
+        assert should_use_multi_agent(question, mode, tasks) == (
+            multi_agent_decision(question, mode, tasks) == DECISION_ACTIVATED
+        )
+
+
+def test_mode_detail_reports_langgraph_unavailable(monkeypatch):
+    import src.agent.orchestration.mode as mode_mod
+
+    monkeypatch.setenv("AGENT_MULTI_AGENT", "auto")
+    monkeypatch.setattr(mode_mod, "langgraph_available", lambda: False)
+    detail = mode_mod.multi_agent_mode_detail()
+    assert detail == {
+        "configured": "auto",
+        "effective": "off",
+        "reason": "langgraph_unavailable",
+    }
+
+
+def test_mode_detail_reports_invalid_env(monkeypatch):
+    monkeypatch.setenv("AGENT_MULTI_AGENT", "banana")
+    detail = multi_agent_mode_detail()
+    assert detail == {"configured": "off", "effective": "off", "reason": "invalid_env"}

@@ -133,12 +133,25 @@ def route_question(
     ]
 
 
-def should_use_multi_agent(
+#: 多 Agent 决策结果。与 done 帧的 `multi_agent.decision` 一一对应。
+DECISION_OFF = "off"
+DECISION_ACTIVATED = "activated"
+DECISION_SHORT = "declined_short"
+DECISION_SINGLE_EXPERT = "declined_single_expert"
+DECISION_NO_TASKS = "declined_no_tasks"
+DECISION_ERROR = "declined_error"
+
+
+def multi_agent_decision(
     question: str,
     mode: str,
     tasks: list[AgentTask],
-) -> bool:
-    """决定是否真的走图；`auto` 只对**多专家**问题启用。
+) -> str:
+    """返回"为什么不走图/为什么走图"的确定性原因。
+
+    这是 `should_use_multi_agent` 的唯一判据来源：先判 mode，再判 tasks，
+    再判短问题，最后按 on/auto 分流。这样 done 帧记录的原因与实际行为
+    不会各写一套逻辑。
 
     ★ 为什么 auto 不再看 `is_compound_question`
     ----------------------------------------
@@ -147,21 +160,39 @@ def should_use_multi_agent(
     A/B 里 latency 8s → 33.8s（含一次偶发 fallback），质量无提升。
     单专家题交给旧 ReAct 更稳、更便宜；`on` 仍无条件走图（评测/A-B 用）。
     """
-    if mode not in ("auto", "on") or not tasks:
-        return False
+    if mode not in ("auto", "on"):
+        return DECISION_OFF
+    if not tasks:
+        return DECISION_NO_TASKS
     # 过短/疑似需要澄清的问题交给旧 ReAct，沿用现有 clarify 逻辑。
     if len(str(question or "").strip()) < CLARIFY_MIN_QUESTION_CHARS:
-        return False
+        return DECISION_SHORT
     if mode == "on":
-        return True
+        return DECISION_ACTIVATED
     # auto：只有至少两个 specialist 才值得并行；单专家一律回退旧路径。
-    return len(tasks) >= 2
+    return DECISION_ACTIVATED if len(tasks) >= 2 else DECISION_SINGLE_EXPERT
+
+
+def should_use_multi_agent(
+    question: str,
+    mode: str,
+    tasks: list[AgentTask],
+) -> bool:
+    """决定是否真的走图；判据见 `multi_agent_decision`。"""
+    return multi_agent_decision(question, mode, tasks) == DECISION_ACTIVATED
 
 
 __all__ = [
     "AgentTask",
+    "DECISION_ACTIVATED",
+    "DECISION_ERROR",
+    "DECISION_NO_TASKS",
+    "DECISION_OFF",
+    "DECISION_SHORT",
+    "DECISION_SINGLE_EXPERT",
     "MAX_SPECIALIST_ROUNDS",
     "SPECIALIST_TOOLS",
+    "multi_agent_decision",
     "route_question",
     "should_use_multi_agent",
 ]
