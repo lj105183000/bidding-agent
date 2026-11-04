@@ -27,9 +27,21 @@ def test_web_only_when_enabled():
     assert enabled[0].agent == "web"
 
 
-def test_auto_requires_multi_intent_or_compound():
+def test_auto_requires_at_least_two_specialists():
     single = route_question("什么是政府采购", web_enabled=False)
+    assert len(single) == 1
     assert should_use_multi_agent("什么是政府采购", "auto", single) is False
+
+    # is_compound_question 判为复合，但路由只有一个专家：auto 仍不走图。
+    single_compound = route_question("公开招标和邀请招标有什么区别？", web_enabled=False)
+    assert len(single_compound) == 1
+    assert should_use_multi_agent(
+        "公开招标和邀请招标有什么区别？", "auto", single_compound
+    ) is False
+    # `on` 是无条件开关（评测/A-B 用），单专家题仍走图。
+    assert should_use_multi_agent(
+        "公开招标和邀请招标有什么区别？", "on", single_compound
+    ) is True
 
     multi = route_question("统计中标金额并分析供应商关系", web_enabled=False)
     assert len(multi) >= 2
