@@ -138,7 +138,7 @@ src/config.py       Settings dataclass，__post_init__ 校验必需项，缺失�
 - **注释与日志用中文**，风格是**解释「为什么」而非复述「做什么」**。
 - 常量集中在 `src/agent/constants.py` 顶部并附语义说明；magic number 一律提为命名常量。
 - 单例命名小写下划线（`rag_pipeline`），类名大驼峰（`RAGPipeline`）。
-- 所有外部调用必须有超时（LLM 60s / 本地模型 300s / Qdrant 30s / Neo4j 30s / MCP 60s / 工具总 30s）。
+- 所有外部调用必须有超时（LLM 60s / 本地模型 300s / Qdrant 单次 10s + 读重试 2 次 / Neo4j 30s / MCP 60s / 工具总 30s）。
 - 共享可变状态必须加锁。
 - 全部端点用**同步 `def`**（FastAPI 自动放线程池），慢的 LLM 生成不阻塞事件循环。
 

@@ -393,7 +393,13 @@ def decide_exit_code(
         unknown = [
             v for v in (values or [])
             if v not in known
-            and v not in {"agent", "retrieval", "retrieval_offline", "rag"}
+            and v not in {
+                "agent",
+                "agent_multi",
+                "retrieval",
+                "retrieval_offline",
+                "rag",
+            }
         ]
         if unknown:
             raise ValueError(f"{name} 里有未知的评测线：{unknown}")
@@ -437,6 +443,18 @@ def decide_exit_code(
         "allow_fail": allow_fail or [],
         "case_count_mismatch": list(comparison.case_count_mismatch) if comparison else [],
         "no_baseline_reason": comparison.no_baseline_reason if comparison else "",
+        # ★ 把"用了哪次基线"写进 gate artifact：缓存/套件集合导致"无基线"时，
+        #   只看 artifact 也能定位，不必翻整个 job 日志。
+        "baseline_run_id": comparison.baseline_run_id if comparison else "",
+        "baseline_suites_source": (
+            comparison.baseline_suites_source if comparison else ""
+        ),
+        "suite_baselines": (
+            dict(comparison.suite_baselines) if comparison else {}
+        ),
+        "baseline_all_not_run": (
+            bool(comparison.baseline_all_not_run) if comparison else False
+        ),
     }
     return code, detail
 

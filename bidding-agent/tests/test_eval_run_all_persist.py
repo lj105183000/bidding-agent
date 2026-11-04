@@ -110,3 +110,33 @@ def test_main_without_save_db_does_not_write(monkeypatch):
 
     assert RA.main() == 0
     assert calls == []
+
+
+def test_main_gate_without_save_does_not_append(monkeypatch, capsys):
+    """CI save=false 时 `--gate` 只比不存，不能偷偷改写趋势文件。"""
+    appended: list = []
+    _patch_main(monkeypatch, _report(), [])
+    monkeypatch.setattr(T, "append_report", lambda *a, **k: appended.append(a))
+    monkeypatch.setattr(T, "load_history", lambda path=None: [])
+    monkeypatch.setattr(T, "compare_with_previous", lambda *a, **k: None)
+    monkeypatch.setattr(sys, "argv", [
+        "run_all", "--suites", "retrieval_offline", "--gate",
+    ])
+
+    assert RA.main() == 0
+    assert appended == []
+    assert "不写趋势文件" in capsys.readouterr().out
+
+
+def test_main_gate_with_save_appends(monkeypatch):
+    appended: list = []
+    _patch_main(monkeypatch, _report(), [])
+    monkeypatch.setattr(T, "append_report", lambda *a, **k: appended.append(a))
+    monkeypatch.setattr(T, "load_history", lambda path=None: [])
+    monkeypatch.setattr(T, "compare_with_previous", lambda *a, **k: None)
+    monkeypatch.setattr(sys, "argv", [
+        "run_all", "--suites", "retrieval_offline", "--gate", "--save",
+    ])
+
+    assert RA.main() == 0
+    assert len(appended) == 1

@@ -149,6 +149,11 @@ jobs:
         run: uv sync --frozen
       # ★ 趋势文件必须**按线隔离**缓存：三个 matrix job 并发时若共用同一个
       #   key，actions/cache 只会保留最先保存的那份，其余线的基线被静默覆盖。
+      #
+      # ★ 禁止跨线 fallback（`eval-trend-main-`）：那会把另一条线的旧快照
+      #   覆盖到 checkout 出来的 trend.jsonl 上，导致本线历史"消失"、门禁
+      #   显示"无基线"却仍然绿。没有本线缓存时就让仓库里的趋势文件作为基线，
+      #   跑完后由下面的 cache/save 建立本线缓存。
       - name: 恢复趋势文件（按线）
         # 用 cache/restore 而不是 cache：避免在成功时自动保存，
         # 下面用显式 cache/save 保证**门禁失败时也保存**新基线。
@@ -158,7 +163,6 @@ jobs:
           key: eval-trend-${{ github.ref_name }}-${{ matrix.suite }}-${{ github.run_id }}
           restore-keys: |
             eval-trend-${{ github.ref_name }}-${{ matrix.suite }}-
-            eval-trend-${{ github.ref_name }}-
       # ★ 模型必须先缓存/预热：门禁步骤设置了 HF_HUB_OFFLINE=1。
       #   缓存未命中且不预热时，模型加载失败会变成 NOT_RUN —— 而 NOT_RUN
       #   不参与 --fail-on 判定，工作流会"静默变绿"。
@@ -222,6 +226,24 @@ jobs:
           if suite not in detail.get('ran_suites', []):
               sys.exit(f'{suite} 未执行（NOT_RUN），门禁结果无效')
           print('评测线已执行：' + suite)
+          "
+      # ★ 无基线不能静默变绿：save=false 时缺基线说明门禁不可用，直接红；
+      #   save=true 时允许建立基线，但要打 warning 让人看见。
+      - name: 校验门禁基线
+        if: always()
+        run: |
+          uv run python -c "
+          import json, sys
+          suite = '${{ matrix.suite }}'
+          detail = json.load(open(f'gate-{suite}.json', encoding='utf-8'))
+          reason = str(detail.get('no_baseline_reason') or '')
+          save = '${{ github.event.inputs.save }}'
+          if reason and save != 'true':
+              sys.exit(f'{suite} 无基线且 save!=true，门禁不可用：{reason}')
+          if reason:
+              print(f'::warning title=无基线::{suite}：{reason}（本次 save=true，已建立基线）')
+          else:
+              print('门禁基线：' + str(detail.get('baseline_run_id') or '?'))
           "
       - name: 上传门禁决策
         if: always()

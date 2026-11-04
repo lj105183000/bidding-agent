@@ -36,6 +36,8 @@ def _store(collection: str) -> VectorStore:
                 dim=settings.qdrant_vector_size,
                 distance=settings.qdrant_distance,
                 timeout=int(settings.qdrant_timeout),
+                read_retries=settings.qdrant_read_retries,
+                retry_backoff_s=settings.qdrant_retry_backoff_s,
             )
             _stores[collection] = store
         return store
@@ -54,7 +56,7 @@ def count(collection: str) -> int:
 def collection_exists(collection: str) -> bool:
     """集合是否存在；失败抛 DataHubUnavailableError。"""
     try:
-        return bool(_store(collection).client.collection_exists(collection))
+        return bool(_store(collection).collection_exists())
     except Exception as exc:
         raise DataHubUnavailableError(
             f"Qdrant 连接失败：{type(exc).__name__}"

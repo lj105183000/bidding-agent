@@ -207,6 +207,8 @@ def _build_store(store: Any | None = None):
         dim=settings.qdrant_vector_size,
         distance=settings.qdrant_distance,
         timeout=settings.qdrant_timeout,
+        read_retries=settings.qdrant_read_retries,
+        retry_backoff_s=settings.qdrant_retry_backoff_s,
     )
 
 
@@ -487,7 +489,7 @@ def search_regulations(
 
     try:
         if use_hybrid:
-            response = target.client.query_points(
+            response = target.query_points(
                 collection_name=target.collection,
                 prefetch=[
                     models.Prefetch(
@@ -505,7 +507,7 @@ def search_regulations(
                 with_vectors=[DENSE_VECTOR_NAME],
             )
         else:
-            response = target.client.query_points(
+            response = target.query_points(
                 collection_name=target.collection,
                 query=vector,
                 using=DENSE_VECTOR_NAME,
