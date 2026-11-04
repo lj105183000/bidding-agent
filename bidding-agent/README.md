@@ -141,3 +141,4 @@ uv run pytest -q          # 3497 passed / 3 skipped / 10 deselected
 | `docs/组件工作机制.md` | 20+ 组件的 Mermaid 机制图解 |
 | `docs/并行开发协作.md` | 多 Agent 并行开发：所有权/契约/共享资源/合并流程 |
 | `docs/增加Agent功能.md` | 二期功能清单（历史参考；多 Agent 等已落地） |
+| [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | 贡献流程：环境、分支/PR、测试、代码风格与安全约定 |
