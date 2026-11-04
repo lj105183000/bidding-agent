@@ -2,6 +2,7 @@
 
 感谢参与招投标采购 Agent。提交代码前请先阅读：
 
+- [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)：社区行为准则
 - [`CLAUDE.md`](CLAUDE.md) / [`AGENTS.md`](AGENTS.md)：架构约定、契约红线、测试约定
 - [`bidding-agent/docs/并行开发协作.md`](bidding-agent/docs/并行开发协作.md)：多 Agent 并行开发的所有权/冻结契约/合并流程
 - [`bidding-agent/docs/开发文档.md`](bidding-agent/docs/开发文档.md)：环境、API 契约、评测、部署、排障
