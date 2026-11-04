@@ -72,6 +72,111 @@ https://github.com/user-attachments/assets/b5fb784c-f1fe-40e5-a995-503c62d19567
 | 前端 | React 18 · TypeScript · Vite 5 · Tailwind CSS · Recharts · React Router |
 | 测试 | pytest（3497 passed / 3 skipped / 10 deselected）· Vitest（100 passed / 2 skipped） |
 
+## 架构
+
+两张图分别回答两个问题：系统由哪些部分组成，用户能完成哪些事。图由 GitHub 原生 Mermaid 渲染，修改架构时直接改 Markdown 即可。
+
+### 技术架构
+
+```mermaid
+flowchart TB
+  subgraph FE["前端"]
+    SPA["React 18 + Vite 5 SPA<br/>:5173 / 14 个业务页面 / SSE 流式渲染"]
+  end
+  subgraph API["API 服务"]
+    FASTAPI["FastAPI + uvicorn<br/>:8001 / REST + SSE / 限流 / 健康检查"]
+  end
+  subgraph AG["Agent 编排"]
+    REACT["ReAct 循环<br/>最多 4 轮工具调用"]
+    MULTI["LangGraph 多 Agent<br/>可选模式<br/>route -> specialists xN<br/>merge -> synthesize"]
+    RUNNER["ToolRunner<br/>8 个工具 / 4 线程并行 / 30s 超时 / 异常隔离"]
+  end
+  subgraph CAP["工具与能力"]
+    RAG["RAG 混合检索<br/>dense 512 + jieba BM25<br/>Prefetch/RRF + BGE 精排"]
+    GRAPH["知识图谱查询<br/>6 类模板"]
+    SQL["结构化数据查询<br/>6 类模板"]
+    WEB["联网搜索<br/>Tavily / 智谱 / Exa MCP"]
+    BIZ["业务服务<br/>提取 / 资格 / 合规 / 比价 / 物料 / 分析 / 报告"]
+    LLM["LLM 客户端<br/>DeepSeek / 智谱 / vLLM / Ollama"]
+  end
+  subgraph DATA["数据与存储"]
+    QDRANT[("Qdrant<br/>:6333 / :6334<br/>bid_qa / bid_regulations")]
+    NEO4J[("Neo4j<br/>:7474 / :7687<br/>知识图谱 / 6 类查询")]
+    PG[("PostgreSQL<br/>:5432<br/>bidding_records / 会话 / 评测")]
+  end
+  subgraph OPS["数据中台与评测"]
+    HUB["数据中台<br/>目录 / 血缘 / 质量 / 调度"]
+    EVAL["五线评测 + Eval Gate"]
+    METRICS["/api/metrics<br/>/api/eval/online"]
+  end
+  SPA -->|"REST + SSE"| FASTAPI
+  FASTAPI --> REACT
+  FASTAPI --> MULTI
+  REACT --> RUNNER
+  MULTI --> RUNNER
+  REACT --> LLM
+  MULTI --> LLM
+  RUNNER --> RAG
+  RUNNER --> GRAPH
+  RUNNER --> SQL
+  RUNNER --> WEB
+  RUNNER --> BIZ
+  RAG --> QDRANT
+  GRAPH --> NEO4J
+  SQL --> PG
+  BIZ --> PG
+  BIZ --> NEO4J
+  BIZ --> QDRANT
+  QDRANT --> HUB
+  NEO4J --> HUB
+  PG --> HUB
+  PG --> EVAL
+  EVAL --> METRICS
+```
+
+- **部署**：本地 `docker-compose.yml` 可拉起 PostgreSQL 16 / Neo4j 5 / Qdrant / vLLM（MinIO 为可选声明资产）；生产用单进程 `uvicorn api.server:app`，FastAPI 可同源托管 `frontend/dist`。
+- **关键约束**：限流器、缓存、MCP 子进程均为进程内单例，生产必须单进程；`/api/chat/stream` 以 SSE 输出 status / token / thinking / reset / clarify / done / error，`done` 携带 sources、tool_name、elapsed_ms、phase_times、multi_agent。
+- **规模**：14 个页面、85 个端点、8 个工具、5 条评测线；完整端点见 `bidding-agent/docs/开发文档.md`。
+
+### 产品架构
+
+```mermaid
+flowchart TB
+  U["用户<br/>采购人 / 供应商<br/>评标专家 / 管理者"]
+  subgraph J["业务旅程"]
+    direction LR
+    J1["找标讯"] --> J2["读文件"] --> J3["问知识"] --> J4["查风险"] --> J5["做决策"] --> J6["看复盘"]
+  end
+  subgraph P["产品应用（14 个页面）"]
+    direction LR
+    P1["工作台<br/>统一入口与总览"]
+    P2["标讯智能提取<br/>招标文件解析 / 变更追踪"]
+    P3["智能问答<br/>知识图谱 / 图谱可视化"]
+    P4["资格审查<br/>合规性检查 / 截止日期监控"]
+    P5["智能商品比价<br/>物料智能识别<br/>集采分析与推荐"]
+    P6["评估看板<br/>质量与效果"]
+    P1 ~~~ P2 ~~~ P3 ~~~ P4 ~~~ P5 ~~~ P6
+  end
+  subgraph C["能力底座"]
+    direction LR
+    C1["RAG 混合检索 / 知识图谱"]
+    C2["结构化数据 / 联网搜索"]
+    C3["多 Agent 编排"]
+    C4["五线评测与灰度"]
+    C1 ~~~ C2 ~~~ C3 ~~~ C4
+  end
+  V["价值<br/>降本 / 提效 / 合规 / 可追溯"]
+  U --> J
+  J --> P
+  P --> C
+  C --> V
+```
+
+- **产品分组**：工作台 → 标讯/文件 → 问答/图谱 → 风险/合规 → 决策/分析 → 评测，覆盖 14 个页面。
+- **能力底座**：RAG 混合检索、知识图谱、结构化数据、联网搜索、多 Agent 编排与五线评测。
+- **面向角色**：采购人、供应商、评标专家与管理者，价值是降本、提效、合规、可追溯。
+- 组件级机制见 `bidding-agent/docs/组件工作机制.md`；其中前端章节为历史 Next.js 目标架构，当前实现以本图与根 README 为准。技术栈细节见 `bidding-agent/docs/技术栈.md` §1，后端架构约定见 `bidding-agent/docs/开发文档.md` §8.1。
+
 ## 快速开始
 
 ### 准备
