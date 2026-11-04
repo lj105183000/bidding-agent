@@ -1,6 +1,13 @@
 # 招投标采购 Agent（招投标智能问答系统）
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/lj105183000/bidding-agent/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/lj105183000/bidding-agent/actions/workflows/ci.yml)
+[![Security](https://img.shields.io/github/actions/workflow/status/lj105183000/bidding-agent/security.yml?branch=main&style=flat-square&label=Security)](https://github.com/lj105183000/bidding-agent/actions/workflows/security.yml)
+[![License: MIT](https://img.shields.io/github/license/lj105183000/bidding-agent?style=flat-square)](LICENSE)
+[![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI 0.139+](https://img.shields.io/badge/FastAPI-0.139%2B-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![React 18](https://img.shields.io/badge/React-18.3-61DAFB?style=flat-square&logo=react&logoColor=black)](https://react.dev/)
+[![Vite 5](https://img.shields.io/badge/Vite-5.4-646CFF?style=flat-square&logo=vite&logoColor=white)](https://vitejs.dev/)
+[![TypeScript 5.6](https://img.shields.io/badge/TypeScript-5.6-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 
 面向招投标采购场景的智能问答系统：以 **RAG 混合检索（Qdrant）+ 知识图谱（Neo4j）+ 结构化数据库（PostgreSQL）+ 联网搜索（Tavily/Exa）** 四路数据源为底座，由 **ReAct 多轮工具循环**或**可选 LangGraph 多 Agent 编排（Phase 1a/1b）**回答问题，前端 **React 18 + Vite 5** 流式渲染（SSE）。
 
