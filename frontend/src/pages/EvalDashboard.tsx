@@ -52,7 +52,19 @@ import {
   type OfflineEvalSnapshot,
   type OfflineMetric,
   type OnlineEvalSnapshot,
+  type OnlineMultiAgentSummary,
 } from '../lib/evalApi'
+import {
+  DECISION_LABELS,
+  FALLBACK_LABELS,
+  MODE_LABELS,
+  REASON_LABELS,
+  formatMs,
+  formatRate,
+  hasMultiAgentData,
+  rowsFromCounts,
+  type CountRow,
+} from '../lib/multiAgentCanary'
 
 /**
  * 一条指标卡。
@@ -161,6 +173,153 @@ function RateRow({ label, value, hint }: { label: string; value: number | null |
         <span className="text-ink-300" title="没有可用样本">
           —
         </span>
+      )}
+    </div>
+  )
+}
+
+/** 一组带中文标签的计数 chip；只显示 count>0 的项。 */
+function CountChips({ title, rows }: { title: string; rows: CountRow[] }) {
+  const visible = rows.filter((row) => row.count > 0)
+  return (
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
+      <span className="text-ink-500">{title}</span>
+      {visible.length ? (
+        visible.map((row) => (
+          <span
+            key={row.key}
+            className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-ink-600"
+            title={`${(row.share * 100).toFixed(1)}%`}
+          >
+            {row.label} <b className="tabular-nums">{row.count}</b>
+          </span>
+        ))
+      ) : (
+        <span className="text-ink-300">—</span>
+      )}
+    </div>
+  )
+}
+
+/**
+ * 多 Agent 灰度面板：只消费 `/api/eval/online.multi_agent`。
+ *
+ * ★ 为什么单独一块而不是混进上面的比例网格
+ * ------------------------------------
+ * 上面的比例是"全量/单轮行为"；这里回答的是"auto 到底激活了多少、
+ * 被拒的原因是什么、激活样本的延迟/成本/核对如何"。混在一起会让
+ * `activated_rate` 被读成"答案质量"。
+ */
+function MultiAgentCanaryPanel({ ma }: { ma: OnlineMultiAgentSummary }) {
+  const modeRows = rowsFromCounts(ma.mode_counts, MODE_LABELS)
+  const decisionRows = rowsFromCounts(ma.decision_counts, DECISION_LABELS)
+  const fallbackRows = rowsFromCounts(ma.fallback_counts, FALLBACK_LABELS)
+  const reasonRows = rowsFromCounts(ma.mode_reason_counts, REASON_LABELS)
+  const warningReasons = ['langgraph_unavailable', 'invalid_env'].filter(
+    (key) => (ma.mode_reason_counts?.[key] ?? 0) > 0,
+  )
+  const order = ['off', 'auto', 'on', 'unknown']
+  const modes = Object.keys(ma.by_mode ?? {}).sort(
+    (a, b) => order.indexOf(a) - order.indexOf(b),
+  )
+
+  return (
+    <div className="rounded-md border border-slate-200 bg-slate-50/60 px-3 py-2">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-[11px] font-medium text-ink-600">
+          多 Agent 灰度（auto）
+        </span>
+        <span className="text-[10px] text-ink-400">
+          {ma.sample_window
+            ? `带时间戳样本 ${ma.sample_window.with_ts}`
+            : '暂无时间戳样本'}
+        </span>
+      </div>
+
+      {warningReasons.length > 0 && (
+        <div className="mb-2 flex items-start gap-1.5 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] text-amber-700">
+          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+          <span>
+            配置了 auto 但实际未生效：
+            {warningReasons
+              .map((key) => `${REASON_LABELS[key] ?? key} ${ma.mode_reason_counts?.[key] ?? 0} 次`)
+              .join('、')}
+            。
+          </span>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-x-6 gap-y-1 sm:grid-cols-2">
+        <RateRow
+          label="auto 激活率"
+          value={ma.activated_rate}
+          hint="分母仅 auto/on 且 activated 为 bool 的样本"
+        />
+        <RateRow
+          label="partial 比例"
+          value={ma.partial_rate}
+          hint="分母仅 activated=true 的样本"
+        />
+      </div>
+
+      <div className="mt-2 space-y-1">
+        <CountChips title="模式" rows={modeRows} />
+        <CountChips title="决策" rows={decisionRows} />
+        <CountChips title="回退" rows={fallbackRows} />
+        <CountChips title="生效原因" rows={reasonRows} />
+      </div>
+
+      {modes.length > 0 && (
+        <div className="mt-2 overflow-x-auto">
+          <table className="w-full text-left text-[10px] text-ink-600">
+            <thead>
+              <tr className="text-ink-400">
+                <th className="py-0.5 pr-3 font-normal">模式</th>
+                <th className="py-0.5 pr-3 font-normal">n</th>
+                <th className="py-0.5 pr-3 font-normal">激活率</th>
+                <th className="py-0.5 pr-3 font-normal">P50</th>
+                <th className="py-0.5 pr-3 font-normal">P95</th>
+                <th className="py-0.5 pr-3 font-normal">LLM 均值</th>
+                <th className="py-0.5 pr-3 font-normal">critical 核对</th>
+                <th className="py-0.5 font-normal">无来源</th>
+              </tr>
+            </thead>
+            <tbody>
+              {modes.map((mode) => {
+                const stats = ma.by_mode?.[mode]
+                return (
+                  <tr key={mode} className="border-t border-slate-200/70">
+                    <td className="py-0.5 pr-3">{MODE_LABELS[mode] ?? mode}</td>
+                    <td className="py-0.5 pr-3 tabular-nums">
+                      {stats?.n ?? '—'}
+                    </td>
+                    <td className="py-0.5 pr-3 tabular-nums">
+                      {formatRate(stats?.activated_rate, stats?.activated_samples)}
+                    </td>
+                    <td className="py-0.5 pr-3 tabular-nums">
+                      {formatMs(stats?.duration_ms?.median)}
+                    </td>
+                    <td className="py-0.5 pr-3 tabular-nums">
+                      {formatMs(stats?.duration_ms?.p95)}
+                    </td>
+                    <td className="py-0.5 pr-3 tabular-nums">
+                      {stats?.llm_calls ? stats.llm_calls.mean.toFixed(2) : '—'}
+                    </td>
+                    <td className="py-0.5 pr-3 tabular-nums">
+                      {formatRate(
+                        stats?.verify_critical_ok_rate,
+                        stats?.verify_checked,
+                      )}
+                    </td>
+                    <td className="py-0.5 tabular-nums">
+                      {formatRate(stats?.no_source_rate)}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   )
@@ -443,6 +602,10 @@ export default function EvalDashboard() {
               />
               <RateRow label="上下文压缩比例" value={online.compaction_rate} />
             </div>
+
+            {online.multi_agent && hasMultiAgentData(online.multi_agent) && (
+              <MultiAgentCanaryPanel ma={online.multi_agent} />
+            )}
 
             <div className="flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-ink-500">
               {/* ---------- 逐轮 LLM 裁判（RAGAS 风格）---------- */}
