@@ -551,42 +551,46 @@ METRIC_SPECS: dict[str, MetricSpec] = {
         ),
     ),
     # ---- 多 Agent 线（Phase 1b）----
-    # 首 5 次只观测路由/专家/引用/降级比例；拿到基线后再启用绝对门槛。
-    # 延迟与核对红线先设门槛，避免"多 Agent 把产品拖慢/编造"被静默放过。
+    # 2026-11 首轮标定：24 题数据集（web off 实跑 22 题、20 题进入核对分母），
+    # 连续 3 次取中位全绿后启用绝对门槛。阈值按 rationale 的目标值设定；
+    # 22 题下单题翻转约 4.5%，仍在容差内。
     "agent_multi.routing_accuracy": MetricSpec(
         name="agent_multi.routing_accuracy",
         label="专家路由准确率",
         direction=Direction.HIGHER_IS_BETTER,
-        threshold=None,
+        threshold=0.90,
+        calibrated_on_runs=3,
         unit="ratio",
         suite="agent_multi",
         rationale=(
             "期望专家集合被实际 route 覆盖、且不出现 forbidden_agents；"
-            "fallback 题要求真的降级。目标 ≥0.90，Phase 1b 首 5 次先只观测。"
+            "fallback 题要求真的降级。首轮标定 ≥0.90。"
         ),
     ),
     "agent_multi.specialist_tool_accuracy": MetricSpec(
         name="agent_multi.specialist_tool_accuracy",
         label="专家工具命中率",
         direction=Direction.HIGHER_IS_BETTER,
-        threshold=None,
+        threshold=0.90,
+        calibrated_on_runs=3,
         unit="ratio",
         suite="agent_multi",
         rationale=(
             "每个期望 specialist 至少命中一个期望工具（按 tool_timings[].agent/name）。"
-            "目标 ≥0.90；先观测，避免新线首次运行直接打红。"
+            "首轮标定 ≥0.90。"
         ),
     ),
     "agent_multi.synthesis_citation_rate": MetricSpec(
         name="agent_multi.synthesis_citation_rate",
         label="综合引用通过率",
         direction=Direction.HIGHER_IS_BETTER,
-        threshold=None,
+        threshold=0.90,
+        calibrated_on_runs=3,
         unit="ratio",
         suite="agent_multi",
         rationale=(
             "verification.ok 且 sources/web_sources 非空；require_citation=false 的题直接计通过。"
-            "目标 ≥0.90；首 5 次只观测。"
+            "首轮标定 ≥0.90。"
         ),
     ),
     "agent_multi.latency_p95": MetricSpec(
@@ -606,20 +610,22 @@ METRIC_SPECS: dict[str, MetricSpec] = {
         name="agent_multi.partial_rate",
         label="专家部分失败比例",
         direction=Direction.LOWER_IS_BETTER,
-        threshold=None,
+        threshold=0.10,
+        calibrated_on_runs=3,
         unit="ratio",
         suite="agent_multi",
-        rationale="专家超时/非 ok 或 orchestration.partial 的题占比；目标 ≤0.10。",
+        rationale="专家超时/非 ok 或 orchestration.partial 的题占比；首轮标定 ≤0.10（22 题中允许 2 题）。",
     ),
     "agent_multi.fallback_rate": MetricSpec(
         name="agent_multi.fallback_rate",
         label="回退旧路径比例",
         direction=Direction.LOWER_IS_BETTER,
-        threshold=None,
+        threshold=0.10,
+        calibrated_on_runs=3,
         unit="ratio",
         suite="agent_multi",
         rationale=(
-            "orchestration 缺失或 fallback!=none 的题占比；目标 ≤0.10。"
+            "orchestration 缺失或 fallback!=none 的题占比；首轮标定 ≤0.10。"
             "fallback 题本身应降级，故该指标需结合 routing 一起看。"
         ),
     ),
@@ -627,20 +633,22 @@ METRIC_SPECS: dict[str, MetricSpec] = {
         name="agent_multi.llm_calls_mean",
         label="平均 LLM 调用次数",
         direction=Direction.LOWER_IS_BETTER,
-        threshold=None,
+        threshold=5.0,
+        calibrated_on_runs=3,
         unit="次",
         suite="agent_multi",
-        rationale="来自 done.llm_trace.call_count；目标 ≤5.0，先观测成本结构。",
+        rationale="来自 done.llm_trace.call_count；首轮标定 ≤5.0（3 次中位 4.73）。",
     ),
     "agent_multi.routing_llm_rate": MetricSpec(
         name="agent_multi.routing_llm_rate",
         label="LLM 路由占比",
         direction=Direction.LOWER_IS_BETTER,
-        threshold=None,
+        threshold=0.15,
+        calibrated_on_runs=3,
         unit="ratio",
         suite="agent_multi",
         rationale=(
-            "非 rules 路由的题占比；Phase 1b 默认规则路由，目标 ≤0.15。"
+            "非 rules 路由的题占比；Phase 1b 默认规则路由，首轮标定 ≤0.15。"
             "该指标用于后续开启 AGENT_MULTI_ROUTER 时监控成本。"
         ),
     ),
@@ -648,10 +656,11 @@ METRIC_SPECS: dict[str, MetricSpec] = {
         name="agent_multi.hit_specialist_cap_rate",
         label="专家撞轮次上限比例",
         direction=Direction.LOWER_IS_BETTER,
-        threshold=None,
+        threshold=0.20,
+        calibrated_on_runs=3,
         unit="ratio",
         suite="agent_multi",
-        rationale="任一专家 rounds>=MAX_SPECIALIST_ROUNDS(2) 的题占比；目标 ≤0.20。",
+        rationale="任一专家 rounds>=MAX_SPECIALIST_ROUNDS(2) 的题占比；首轮标定 ≤0.20。",
     ),
     "agent_multi.verification_critical_ok_rate": MetricSpec(
         name="agent_multi.verification_critical_ok_rate",

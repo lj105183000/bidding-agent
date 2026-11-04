@@ -299,5 +299,68 @@
     "expect_fallback": true,
     "require_citation": false,
     "note": "过短问题应回落旧 ReAct（沿用 clarify 门控）"
+  },
+  {
+    "question": "招标文件要求投标保证金仅接受现金转账，合规吗？",
+    "category": "compliance",
+    "expected_agents": [
+      "compliance"
+    ],
+    "expected_tools": {
+      "compliance": [
+        "check_tender_compliance"
+      ]
+    },
+    "require_citation": true
+  },
+  {
+    "question": "招标文件要求投标人注册资本不低于 8000 万元，合规吗？",
+    "category": "compliance",
+    "expected_agents": [
+      "compliance"
+    ],
+    "expected_tools": {
+      "compliance": [
+        "check_tender_compliance"
+      ]
+    },
+    "require_citation": true
+  },
+  {
+    "question": "投标保证金不得超过预算金额的多少？依据哪条法规？",
+    "category": "single_intent",
+    "expected_agents": [
+      "retrieval"
+    ],
+    "expected_tools": {
+      "retrieval": [
+        "search_knowledge_base",
+        "search_knowledge_graph"
+      ]
+    },
+    "require_citation": true
+  },
+  {
+    "question": "统计中标金额趋势，并判断本地企业加分是否违规。",
+    "category": "multi_intent",
+    "expected_agents": [
+      "compliance",
+      "data",
+      "retrieval"
+    ],
+    "expected_tools": {
+      "compliance": [
+        "check_tender_compliance"
+      ],
+      "data": [
+        "query_database"
+      ],
+      "retrieval": [
+        "search_knowledge_base",
+        "search_knowledge_graph"
+      ]
+    },
+    "require_citation": true,
+    "verify_numbers": false
   }
 ]
