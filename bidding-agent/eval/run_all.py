@@ -1452,12 +1452,17 @@ def main() -> int:
             print()
             print(comparison.render())
         elif args.gate:
-            print("\n门禁：没有历史记录可比，本次只做存档。")
+            print("\n门禁：没有历史记录可比。")
             print("      建基线：`python eval/run_all.py --suites "
                   f"{','.join(suites)} --save`（不带 --gate），之后才有得比。")
 
-        append_report(report, trend_path)
-        print(f"已存入趋势文件（累计 {len(load_history(trend_path))} 次运行）")
+        if args.save:
+            append_report(report, trend_path)
+            print(f"已存入趋势文件（累计 {len(load_history(trend_path))} 次运行）")
+        elif args.gate:
+            # ★ `--gate` 本身**不写趋势文件**：CI 的 save=false 必须真的不落盘，
+            #   否则 cache 后置步骤会把这次结果存成下一轮基线，"只比不存"失效。
+            print("门禁模式未加 --save：不写趋势文件")
 
     # ★ 数据库写入与趋势文件**相互独立**：触发接口只传 --save-db，
     #   不碰趋势文件；数据库失败也只告警，不影响下面的门禁退出码。

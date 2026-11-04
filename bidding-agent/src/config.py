@@ -45,6 +45,12 @@ class Settings:
     qdrant_vector_size: int = int(os.getenv("QDRANT_VECTOR_SIZE", "1024"))
     qdrant_distance: str = os.getenv("QDRANT_DISTANCE", "Cosine")
     qdrant_timeout: float = float(os.getenv("QDRANT_TIMEOUT", "10.0"))
+    # 读操作（count/query/retrieve）遇到瞬时超时/断连的重试次数与退避。
+    # 写操作（upsert/建集合）不重试，避免重复写入。
+    qdrant_read_retries: int = int(os.getenv("QDRANT_READ_RETRIES", "2"))
+    qdrant_retry_backoff_s: float = float(
+        os.getenv("QDRANT_RETRY_BACKOFF_S", "0.2")
+    )
 
     # ---- 检索与重排配置 ----
     # 对应 pipeline.py 里的 settings.rerank_enabled

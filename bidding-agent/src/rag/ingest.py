@@ -116,6 +116,8 @@ def ingest_data(
         dim=settings.qdrant_vector_size,
         distance=settings.qdrant_distance,
         timeout=settings.qdrant_timeout,
+        read_retries=settings.qdrant_read_retries,
+        retry_backoff_s=settings.qdrant_retry_backoff_s,
     )
     embedder = embedder or default_embedder
 

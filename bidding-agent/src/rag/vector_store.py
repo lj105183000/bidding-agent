@@ -49,6 +49,30 @@ _DISTANCE_MAP = {
     "manhattan": models.Distance.MANHATTAN,
 }
 
+#: 读操作可重试的瞬时错误特征。
+#:
+#: 只匹配超时/断连；鉴权失败、集合不存在、请求格式错误等重试没有意义，
+#: 反而会拖慢故障暴露。qdrant-client 会把 httpx 的 ReadTimeout 包成
+#: `ResponseHandlingException`，故类名与文本都要看。
+_TRANSIENT_ERROR_TOKENS = (
+    "timeout",
+    "timed out",
+    "connecterror",
+    "connect error",
+    "connection",
+    "readerror",
+    "read error",
+    "remotedisconnected",
+    "responsehandlingexception",
+    "temporarily",
+)
+
+
+def _is_transient_qdrant_error(exc: Exception) -> bool:
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    return any(token in name or token in text for token in _TRANSIENT_ERROR_TOKENS)
+
 
 def _cosine(a, b) -> float:
     """两个等长向量的余弦相似度。
@@ -85,6 +109,8 @@ class VectorStore:
         dim: int = 512,
         distance: str = "cosine",
         timeout: int = 30,
+        read_retries: int = 2,
+        retry_backoff_s: float = 0.2,
         client: QdrantClient | None = None,
     ) -> None:
         self.url = url
@@ -93,6 +119,8 @@ class VectorStore:
         self.dim = dim
         self.distance = _DISTANCE_MAP.get(distance.lower(), models.Distance.COSINE)
         self.timeout = timeout
+        self.read_retries = max(0, int(read_retries))
+        self.retry_backoff_s = max(0.0, float(retry_backoff_s))
         self._client = client
         self._lock = threading.Lock()
 
@@ -129,11 +157,61 @@ class VectorStore:
             trust_env=False,
         )
 
+    def _read_with_retry(self, fn, *, op: str):
+        """执行一个**只读** Qdrant 调用；仅对超时/断连重试。
+
+        写操作（upsert/建集合）不走这里：读操作幂等，重试安全；写操作重试
+        可能重复写入。重试次数用尽后原样抛出最后一次异常，让上层降级逻辑
+        继续按原有方式处理。
+        """
+        attempts = self.read_retries + 1
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return fn()
+            except Exception as exc:  # noqa: BLE001 - 只在瞬时错误时重试
+                last_exc = exc
+                if attempt >= attempts or not _is_transient_qdrant_error(exc):
+                    raise
+                delay = self.retry_backoff_s * attempt
+                logger.warning(
+                    "Qdrant %s 读失败（第 %d/%d 次），%.2fs 后重试：%s",
+                    op,
+                    attempt,
+                    attempts,
+                    delay,
+                    exc,
+                )
+                if delay > 0:
+                    time.sleep(delay)
+        assert last_exc is not None
+        raise last_exc
+
+    def collection_exists(self) -> bool:
+        """集合是否存在（读重试）；失败由调用方决定如何降级。"""
+        return bool(
+            self._read_with_retry(
+                lambda: self.client.collection_exists(self.collection),
+                op="collection_exists",
+            )
+        )
+
+    def _query_points(self, **kwargs):
+        """`query_points` 的读重试包装；参数原样透传。"""
+        return self._read_with_retry(
+            lambda: self.client.query_points(**kwargs),
+            op="query_points",
+        )
+
+    def query_points(self, **kwargs):
+        """公开的只读查询入口（带读重试），供其它模块复用。"""
+        return self._query_points(**kwargs)
+
     # ---- 集合管理 ----
 
     def ensure_collection(self, recreate: bool = False) -> None:
         """确保集合存在；`recreate=True` 先删后建（全量重建语义）。"""
-        exists = self.client.collection_exists(self.collection)
+        exists = self.collection_exists()
         if exists and recreate:
             logger.info("删除已存在的集合 %s", self.collection)
             self.client.delete_collection(self.collection)
@@ -155,7 +233,14 @@ class VectorStore:
         return len(points)
 
     def count(self) -> int:
-        return self.client.count(collection_name=self.collection, exact=True).count
+        return int(
+            self._read_with_retry(
+                lambda: self.client.count(
+                    collection_name=self.collection, exact=True
+                ).count,
+                op="count",
+            )
+        )
 
     # ---- 检索 ----
 
@@ -217,7 +302,7 @@ class VectorStore:
         else:
             fusion = models.FusionQuery(fusion=models.Fusion.RRF)
 
-        response = self.client.query_points(
+        response = self._query_points(
             collection_name=self.collection,
             prefetch=[
                 models.Prefetch(
@@ -246,11 +331,14 @@ class VectorStore:
         if not ids:
             return {}
         try:
-            recs = self.client.retrieve(
-                collection_name=self.collection,
-                ids=ids,
-                with_vectors=[DENSE_VECTOR_NAME],
-                with_payload=False,
+            recs = self._read_with_retry(
+                lambda: self.client.retrieve(
+                    collection_name=self.collection,
+                    ids=ids,
+                    with_vectors=[DENSE_VECTOR_NAME],
+                    with_payload=False,
+                ),
+                op="retrieve",
             )
         except Exception as exc:
             logger.warning("取回向量失败，relevance 将不可用: %s", exc)
@@ -343,7 +431,7 @@ class VectorStore:
         `id` 必须保留：`attach_relevance` 靠它取回向量计算余弦相似度。
         `fuse_rrf` 用 `dict(payload[key])` 复制记录，故 id 能穿过应用层融合。
         """
-        response = self.client.query_points(
+        response = self._query_points(
             collection_name=self.collection,
             query=dense_vector,
             using=DENSE_VECTOR_NAME,
@@ -370,7 +458,7 @@ class VectorStore:
         这不代表记录不相关，只是"向量层面不像"。故 relevance 只应与
         同一路径的结果比较，不要跨路径下结论。
         """
-        response = self.client.query_points(
+        response = self._query_points(
             collection_name=self.collection,
             query=sparse_vector,
             using=SPARSE_VECTOR_NAME,

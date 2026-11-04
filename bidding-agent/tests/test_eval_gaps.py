@@ -341,6 +341,31 @@ class TestDecideExitCode:
                     "regressed_suites", "metric_failed_suites", "fail_on", "allow_fail"):
             assert key in detail
 
+    def test_agent_multi_is_known_for_fail_on(self):
+        """agent_multi 未跑时也不能被 --fail-on 当成未知线。"""
+        rep = R.EvalReport(
+            schema_version=R.SCHEMA_VERSION,
+            run_id="empty",
+            version="v1",
+            suites=[],
+        )
+        code, detail = T.decide_exit_code(rep, None, fail_on=["agent_multi"])
+        assert code == 0
+        assert detail["selected_suites"] == ["agent_multi"]
+
+    def test_detail_includes_baseline_identity(self):
+        rep = _report([_suite("agent", [("agent.tool_accuracy", 0.95)])])
+        cmp = T.Comparison(
+            baseline_run_id="base-1",
+            baseline_suites_source="observed",
+            suite_baselines={"agent": "base-1"},
+        )
+        _, detail = T.decide_exit_code(rep, cmp)
+        assert detail["baseline_run_id"] == "base-1"
+        assert detail["baseline_suites_source"] == "observed"
+        assert detail["suite_baselines"] == {"agent": "base-1"}
+        assert detail["baseline_all_not_run"] is False
+
     def test_render_exit_decision_mentions_code_and_ignored(self):
         rep = _report([_suite("agent", [("agent.tool_accuracy", 0.50)])])
         cmp = T.compare_with_previous(rep, self._hist(0.95))

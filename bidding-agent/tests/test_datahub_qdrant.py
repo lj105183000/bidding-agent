@@ -28,6 +28,9 @@ class _FakeStore:
             raise self.error
         return self.points
 
+    def collection_exists(self):
+        return self.client.collection_exists("bid_qa")
+
 
 def test_count_uses_cached_store(monkeypatch):
     monkeypatch.setattr(Q, "_store", lambda collection: _FakeStore(points=42))
@@ -56,6 +59,9 @@ def test_collection_exists_maps_failure(monkeypatch):
 
         def __init__(self):
             self.client = _BrokenClient()
+
+        def collection_exists(self):
+            return self.client.collection_exists("bid_qa")
 
     class _BrokenClient:
         def collection_exists(self, collection):
