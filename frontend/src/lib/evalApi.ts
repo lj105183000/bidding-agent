@@ -69,6 +69,55 @@ export interface OfflineEvalSnapshot {
   sources: Record<string, string>
 }
 
+/** 通用统计块（后端 `_stat` 的形状）。 */
+export interface StatBlock {
+  mean: number
+  median?: number
+  p95?: number
+  min?: number
+  max?: number
+  n: number
+}
+
+/** 单个有效模式的灰度聚合。 */
+export interface MultiAgentModeSummary {
+  n?: number
+  decision_counts?: Record<string, number>
+  activated_rate?: number | null
+  activated_samples?: number
+  fallback_counts?: Record<string, number>
+  partial_rate?: number | null
+  partial_samples?: number
+  duration_ms?: StatBlock | null
+  llm_ms?: StatBlock | null
+  llm_calls?: StatBlock | null
+  tokens?: StatBlock | null
+  verify_checked?: number
+  verify_ok_rate?: number | null
+  verify_critical_ok_rate?: number | null
+  no_source_rate?: number | null
+}
+
+/** `/api/eval/online` 的多 Agent 灰度聚合。旧后端没有该字段。 */
+export interface OnlineMultiAgentSummary {
+  mode_counts?: Record<string, number>
+  configured_mode_counts?: Record<string, number>
+  mode_reason_counts?: Record<string, number>
+  decision_counts?: Record<string, number>
+  activated_rate?: number | null
+  activated_samples?: number
+  partial_rate?: number | null
+  partial_samples?: number
+  fallback_counts?: Record<string, number>
+  route_size?: StatBlock | null
+  by_mode?: Record<string, MultiAgentModeSummary>
+  sample_window?: {
+    with_ts: number
+    oldest: number | null
+    latest: number | null
+  }
+}
+
 /** 在线评测（真实请求采样）的聚合视图。字段较多，按需取用。 */
 export interface OnlineEvalSnapshot {
   sample_count?: number
@@ -82,6 +131,8 @@ export interface OnlineEvalSnapshot {
   rag_cache_hit_rate?: number | null
   relevance_top1?: { mean: number; n: number } | null
   duration_ms?: { mean: number; p95: number; n: number } | null
+  llm_calls?: StatBlock | null
+  llm_calls_total?: number
   rag_steps_mean?: Record<string, number>
   // ---- 逐轮 LLM 裁判（RAGAS 风格）----
   // 只统计**被裁判过**的轮次：采样率 0.2 × 判分率 1.0，故数量远少于样本总数。
@@ -99,6 +150,8 @@ export interface OnlineEvalSnapshot {
   agent_empty_result_rate?: number | null
   provider_switch_rate?: number | null
   compaction_rate?: number | null
+  /** 多 Agent 灰度聚合；旧后端没有该字段时前端不渲染面板。 */
+  multi_agent?: OnlineMultiAgentSummary
   recorder?: Record<string, unknown>
   caveats?: string[]
   error?: string

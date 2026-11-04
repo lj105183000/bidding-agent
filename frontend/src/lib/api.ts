@@ -104,6 +104,21 @@ export async function checkLocalCoverage(query: string): Promise<WebFallbackInfo
   return (await resp.json()) as WebFallbackInfo
 }
 
+/** 多 Agent 决策记录（done.multi_agent，additive）。
+ *
+ * `orchestration` 只在走图时存在；这个字段在每条新请求上都有，
+ * 用于区分 off / auto 被拒 / 已走图。Chat 目前不消费，仅保留类型契约。 */
+export interface MultiAgentRunInfo {
+  mode: string
+  configured_mode?: string
+  mode_reason?: string
+  activated: boolean
+  decision?: string
+  route?: string[]
+  fallback?: string
+  partial?: boolean
+}
+
 /** done 帧（后端契约，type 键见开发文档 §6.4） */
 export interface DoneEvent {
   type: 'done'
@@ -154,6 +169,8 @@ export interface DoneEvent {
    *  回答是模型写的自然语言，数字可能被改写或省略；只有后端见过工具原文。
    *  故这里只消费后端给的结构化数据。 */
   charts?: AnswerChart[]
+  /** 多 Agent 决策记录；旧后端没有该字段。 */
+  multi_agent?: MultiAgentRunInfo | null
   /** 本轮是否以「向用户追问」结束（此时没有正文，来源与工具均为空）。
    *
    *  有这个标志，前端才能区分"答完了但内容为空"（异常）与
