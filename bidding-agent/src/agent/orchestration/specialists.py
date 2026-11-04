@@ -69,6 +69,10 @@ def run_specialist(
     web_enabled: bool = False,
     session_id: str = "",
     trace_recorder=None,
+    budget=None,
+    deadline: float | None = None,
+    cancel_event=None,
+    tool_semaphore=None,
 ) -> dict:
     """执行一个 specialist；任何异常都收敛为结构化结果，不向上抛。"""
     t0 = time.monotonic()
@@ -100,6 +104,11 @@ def run_specialist(
             "clarify_allowed": False,
             "planning_enabled": False,
             "session_id": session_id,
+            # 多 Agent 请求级预算/截止/并发槽；legacy 子调用没有这些键。
+            "_llm_budget": budget,
+            "_multi_agent_deadline": deadline,
+            "_multi_agent_cancel": cancel_event,
+            "_tool_semaphore": tool_semaphore,
         }
         messages = [
             {
@@ -143,10 +152,17 @@ def run_specialist(
             answer = "\n\n".join(result.tool_output_text or [])
         answer = answer[:MULTI_AGENT_PER_AGENT_OUTPUT_CHARS]
         status = "ok"
+        error = ""
         if result.hit_cap:
             status = "partial"
         if not answer:
             status = "empty"
+        if meta.get("_llm_budget_exhausted"):
+            status = "partial"
+            error = "llm_budget_exhausted"
+        if meta.get("_multi_agent_deadline_exceeded"):
+            status = "partial"
+            error = "deadline"
 
         return {
             "agent": task.agent,
@@ -174,7 +190,7 @@ def run_specialist(
             "provider_switches": int(getattr(client, "switch_count", 0) or 0),
             "phase_times": list(meta.get("phase_times") or []),
             "elapsed_ms": int((time.monotonic() - t0) * 1000),
-            "error": "",
+            "error": error,
         }
     except Exception as exc:  # noqa: BLE001 - 单个 specialist 失败不拖垮整图
         logger.warning("specialist %s 执行失败: %s", task.agent, exc)
@@ -192,6 +208,10 @@ def run_specialist_with_timeout(
     web_enabled: bool = False,
     session_id: str = "",
     trace_recorder=None,
+    budget=None,
+    deadline: float | None = None,
+    cancel_event=None,
+    tool_semaphore=None,
     timeout: float = MULTI_AGENT_SPECIALIST_TIMEOUT_S,
 ) -> dict:
     """带墙钟超时的 specialist；超时返回 partial 结果，不阻塞其他专家。"""
@@ -205,6 +225,10 @@ def run_specialist_with_timeout(
         web_enabled=web_enabled,
         session_id=session_id,
         trace_recorder=trace_recorder,
+        budget=budget,
+        deadline=deadline,
+        cancel_event=cancel_event,
+        tool_semaphore=tool_semaphore,
     )
     try:
         return future.result(timeout=timeout)

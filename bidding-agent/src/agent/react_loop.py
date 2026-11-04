@@ -22,6 +22,12 @@ from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import TYPE_CHECKING, Any
 from collections.abc import Iterator
 
+from src.agent.llm_budget import (
+    cancel_requested,
+    deadline_passed,
+    llm_slot,
+    try_acquire_llm_call,
+)
 from src.agent.constants import (
     BASE_TOOL_NAMES,
     CLARIFY_TOOL_NAME,
@@ -266,7 +272,8 @@ class ReActMixin:
         return text, sources, ok
 
     def _execute_tool_ex(self, name: str, arguments: dict,
-                         allowed: set | None = None, question: str = ""):
+                         allowed: set | None = None, question: str = "",
+                         tool_semaphore=None):
         """执行单个工具，**观测值随结果返回**：`(文本, sources, ok, obs)`。
 
         `obs = {"rag": dict|None, "charts": list, "ms": int}`。
@@ -351,7 +358,18 @@ class ReActMixin:
                 from src.rag.timing import reset_marks
 
                 reset_marks()
-                out = ctx.run(executor, arguments or {}, question)
+                if tool_semaphore is not None:
+                    # 多 Agent 下多个 specialist 各有自己的工具批次；共享槽位
+                    # 防止 3 个专家同时把各自的 4 线程打满。排队超时沿用工具
+                    # 自己的 30s 上限，超时按工具失败处理（不拖垮整轮）。
+                    if not tool_semaphore.acquire(timeout=TOOL_TIMEOUT_SECONDS):
+                        raise FutureTimeoutError("tool semaphore wait timeout")
+                    try:
+                        out = ctx.run(executor, arguments or {}, question)
+                    finally:
+                        tool_semaphore.release()
+                else:
+                    out = ctx.run(executor, arguments or {}, question)
                 # ★ 从**本线程**读回计时（写入点是 `search()` 内部的 `finish()`）
                 #
                 # 前两版都读不到，共排查三轮，记下来免得再走：
@@ -433,7 +451,7 @@ class ReActMixin:
         return f"{name}|{payload}"
 
     def _execute_tool_batch(self, calls: list, allowed: set | None,
-                            question: str) -> list[tuple]:
+                            question: str, tool_semaphore=None) -> list[tuple]:
         """一轮内的多个工具调用：**同轮并行 + 同参去重**。
 
         返回与 `calls` **等长同序**的列表：`[(text, sources, ok, obs, deduped), ...]`。
@@ -501,7 +519,9 @@ class ReActMixin:
         results: list[tuple | None] = [None] * len(unique)
         if len(unique) == 1 or TOOL_PARALLEL_WORKERS <= 1:
             for index, (name, arguments) in enumerate(unique):
-                results[index] = self._execute_tool_ex(name, arguments, allowed, question)
+                results[index] = self._execute_tool_ex(
+                    name, arguments, allowed, question, tool_semaphore
+                )
         else:
             workers = min(TOOL_PARALLEL_WORKERS, len(unique))
             with ThreadPoolExecutor(max_workers=workers,
@@ -516,7 +536,8 @@ class ReActMixin:
                     ctx = contextvars.copy_context()
                     futures.append(
                         pool.submit(ctx.run, self._execute_tool_ex,
-                                    name, arguments, allowed, question)
+                                    name, arguments, allowed, question,
+                                    tool_semaphore)
                     )
                 for index, future in enumerate(futures):
                     try:
@@ -987,7 +1008,12 @@ class ReActMixin:
 
         if meta.get("planning_enabled"):
             yield "status", "正在规划检索步骤..."
-            note = self._run_planner(question, client, meta, tool_schemas)
+            if try_acquire_llm_call(meta):
+                with llm_slot(meta):
+                    note = self._run_planner(question, client, meta, tool_schemas)
+            else:
+                meta["_llm_budget_exhausted"] = True
+                note = ""
             if note:
                 conversation = self._append_plan_note(conversation, note)
 
@@ -995,6 +1021,16 @@ class ReActMixin:
         rounds = 0
         for round_no in range(1, max_rounds + 1):
             rounds = round_no
+            # 多 Agent 请求级硬化：截止/取消/预算在**每次 LLM 决策前**检查。
+            # 旧 ReAct 的 meta 没有这些键，helper 全是 no-op。
+            if deadline_passed(meta) or cancel_requested(meta):
+                meta["_multi_agent_deadline_exceeded"] = True
+                hit_cap = True
+                break
+            if not try_acquire_llm_call(meta):
+                meta["_llm_budget_exhausted"] = True
+                hit_cap = True
+                break
             # 状态序列对齐开发文档 §6.3：
             # 检索与搜索 → 分析检索结果 → 补充检索（第N轮）→ ... → 生成回答
             if round_no == 1:
@@ -1003,7 +1039,8 @@ class ReActMixin:
                 yield "status", "正在分析检索结果..."
 
             t0 = time.monotonic()
-            decision = client.chat_raw(conversation, tools=tool_schemas)
+            with llm_slot(meta):
+                decision = client.chat_raw(conversation, tools=tool_schemas)
             # ★ 立刻取走本轮思维链（该属性每轮被覆盖，晚取就丢了）
             round_reasoning = self._take_reasoning(client)
             self._mark_phase(
@@ -1018,7 +1055,12 @@ class ReActMixin:
                     self._assistant_msg(decision, round_reasoning)
                 )
                 conversation.append({"role": "user", "content": _TOOL_CONSTRAINT})
-                decision = client.chat_raw(conversation, tools=tool_schemas)
+                if not try_acquire_llm_call(meta):
+                    meta["_llm_budget_exhausted"] = True
+                    hit_cap = True
+                    break
+                with llm_slot(meta):
+                    decision = client.chat_raw(conversation, tools=tool_schemas)
                 round_reasoning = self._take_reasoning(client)
                 if self._detect_tool_text(decision):
                     # 约束重试仍输出工具格式：放弃本轮调用，按无调用处理
@@ -1064,7 +1106,9 @@ class ReActMixin:
             )
             # ★ 一轮内的多个工具**并行**执行，且同参数重复调用只跑一次
             #   （见 `_execute_tool_batch`：实测串行时阶段耗时 = 各工具之和）
-            batch = self._execute_tool_batch(calls, allowed, question)
+            batch = self._execute_tool_batch(
+                calls, allowed, question, meta.get("_tool_semaphore")
+            )
             results = []
             for call, (text, sources, ok, obs, was_dup) in zip(calls, batch):
                 name = call["name"]

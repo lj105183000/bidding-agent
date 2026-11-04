@@ -109,8 +109,10 @@ src/config.py       Settings dataclass，__post_init__ 校验必需项，缺失�
 
 - `src/agent/orchestration/`：LangGraph（0.3.x）图 → `route`（确定性规则）→ `specialists`（retrieval/data/web/compliance 并行）→ `merge` → `synthesize`。
 - `AGENT_MULTI_AGENT=off|auto|on`，**默认 off**；off 时完全走旧 ReAct，行为不变。`auto` 只在路由出 **≥2 个 specialist** 时走图（单专家题回退旧 ReAct）；`on` 供评测/A-B。依赖缺失自动回落 off。
+- `AGENT_MULTI_ROUTER=off|auto|llm`（默认 off）：off=规则路由；auto=规则只给 1 个专家且问题复合时用一次 LLM 兜底；llm=每次多 Agent 请求先尝试 LLM。5s 超时/非法 JSON/空结果回落规则，不阻断问答。
 - specialist 复用 `react_loop._run_tool_loop`（已从 `_chat_stream_tools` 拆出），**不调用** `_generate_final`；只有 synthesizer 产 token。首 token 前失败/无有效结果自动回退旧 ReAct。
-- 新增 done 字段 `orchestration` / `agent_trace` / `agent_timings` / `multi_agent`（additive）；`multi_agent` 记录 `mode/configured_mode/mode_reason/activated/decision/route/fallback/partial`，用于区分 off / auto 被拒 / 已走图；多 Agent 下 `tool_name` 仍是 primary specialist 的最后一个成功工具（单字符串）。
+- 新增 done 字段 `orchestration` / `agent_trace` / `agent_timings` / `multi_agent`（additive）；`multi_agent` 记录 `mode/configured_mode/mode_reason/activated/decision/route/router/fallback/partial/deadline_exceeded`，用于区分 off / auto 被拒 / 已走图；多 Agent 下 `tool_name` 仍是 primary specialist 的最后一个成功工具（单字符串）。
+- 多 Agent 阶段强制执行 50s 总 deadline、8 次 LLM 调用预算、LLM/工具各 4 并发槽；超时/预算耗尽按 partial → fragment → legacy 分级降级，不产出空答案。`orchestration` 额外带 `router_reason/timeout_reason/llm_calls_used/llm_call_limit/llm_calls_denied/budget_exhausted`。
 - 评测线 `agent_multi` 已落地：`eval/test_cases_multi.json`（24 条，web off 实跑 22 条、20 条进入核对分母）+ 指标注册 + `eval-gate` 接入；`agent` 线强制 off，`agent_multi` 强制 on。3 次取中位基线（P95 14s、引用/核对 100%，`AGENT_VERIFY_REPAIR=1` 口径）后已标定观测阈值。
 - 灰度观测：`/api/metrics` 的 `multi_agent` 是本进程全量聚合（JSON + Prometheus）；`/api/eval/online` 的 `multi_agent` 是采样 + 持久化聚合。分母约定见开发文档 §5.6.1。
 
@@ -121,7 +123,7 @@ src/config.py       Settings dataclass，__post_init__ 校验必需项，缺失�
 | 契约 | 要求 |
 |---|---|
 | SSE `done` 帧 | 字段 `sources / web_sources / tool_name / elapsed_ms / phase_times`；**`tool_name` 必须是单个字符串**（最后一个执行完的工具名），不是数组 |
-| 多 Agent done 字段 | `orchestration / agent_trace / agent_timings / multi_agent` 为 additive；`multi_agent.fallback` 仅在 `activated=true` 时有意义；多 Agent 下 `tool_name` 仍是 primary specialist 的最后一个成功工具（单字符串） |
+| 多 Agent done 字段 | `orchestration / agent_trace / agent_timings / multi_agent` 为 additive；`multi_agent.fallback` 仅在 `activated=true` 时有意义；`router` 取 `rules/llm/llm_fallback`，`deadline_exceeded/budget_*` 为 additive；多 Agent 下 `tool_name` 仍是 primary specialist 的最后一个成功工具（单字符串） |
 | 工具结果 | 统一 `{"success", "data"/"results", "error"}`，失败不抛异常 |
 | 公共导入路径 | `from src.agent import ...` / `from src.rag import ...` 的重导出不可破坏 |
 | 前端落库 | `PersistedMessage` 形状：`id/role/content/sources/toolName/imageAnalyses`；`thinking` 与计时**不落库** |

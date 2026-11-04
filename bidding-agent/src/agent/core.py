@@ -526,6 +526,7 @@ class BiddingAgent(ReActMixin, GenerationMixin, ToolDefenseMixin):
         except LegacyFallback:
             logger.info("多 Agent 无有效专家结果，回退旧 ReAct")
             meta.setdefault("orchestration", {})["fallback"] = "legacy"
+            self._abandon_multi_agent(meta)
             yield from self._chat_stream_tools(
                 messages, client, meta, deep_thinking
             )
@@ -534,9 +535,33 @@ class BiddingAgent(ReActMixin, GenerationMixin, ToolDefenseMixin):
             if meta.get("streamed"):
                 raise
             meta.setdefault("orchestration", {})["fallback"] = "legacy"
+            self._abandon_multi_agent(meta)
             yield from self._chat_stream_tools(
                 messages, client, meta, deep_thinking
             )
+
+    @staticmethod
+    def _abandon_multi_agent(meta: dict) -> None:
+        """回退旧 ReAct 前摘掉预算/截止/并发槽，避免 legacy 被多 Agent 限制。
+
+        线程无法强杀：设置 abandoned/cancel 让图节点在下一个检查点停止；
+        已在 provider 调用中的请求可能继续到 socket 超时，但结果会被忽略。
+        """
+        meta["_multi_agent_abandoned"] = True
+        event = meta.get("_multi_agent_cancel")
+        if event is not None:
+            try:
+                event.set()
+            except Exception:  # noqa: BLE001 - 观测/清理不能影响回退
+                pass
+        for key in (
+            "_llm_budget",
+            "_llm_semaphore",
+            "_tool_semaphore",
+            "_multi_agent_deadline",
+            "_multi_agent_mode",
+        ):
+            meta.pop(key, None)
 
     def _chat_events(  # noqa: PLR0913 - 编排入口，参数多于一般函数属预期
         self, question: str, history: list = None,
@@ -657,8 +682,13 @@ class BiddingAgent(ReActMixin, GenerationMixin, ToolDefenseMixin):
                 "activated": False,
                 "decision": "off",
                 "route": [],
+                "router": "off",
+                "router_reason": "",
+                "router_attempted": False,
+                "router_elapsed_ms": 0,
                 "fallback": "none",
                 "partial": False,
+                "deadline_exceeded": False,
             },
         }
         yield "status", "正在初始化..."
@@ -751,7 +781,10 @@ class BiddingAgent(ReActMixin, GenerationMixin, ToolDefenseMixin):
             #   off 与 auto 被拒都是 null，灰度时无法区分。
             multi_run = None
             try:
-                from src.agent.orchestration.mode import multi_agent_mode_detail
+                from src.agent.orchestration.mode import (
+                    multi_agent_mode_detail,
+                    router_mode,
+                )
 
                 detail = multi_agent_mode_detail()
                 mode_info = meta["multi_agent"]
@@ -764,12 +797,16 @@ class BiddingAgent(ReActMixin, GenerationMixin, ToolDefenseMixin):
                     # 只在开启时 import runtime/graph，避免 off 路径加载编排包。
                     from src.agent.orchestration.runtime import prepare_multi_agent
 
+                    if router_mode() != "off":
+                        yield "status", "正在分析问题..."
                     multi_run = prepare_multi_agent(
                         question,
                         web_enabled=web_search_enabled,
                         skills=self.skills,
                         mode=mode_info["mode"],
                         decision=mode_info,
+                        client=client,
+                        trace_recorder=meta.get("llm_trace"),
                     )
             except Exception:  # noqa: BLE001 - 多 Agent 是增强路径，失败回退旧 ReAct
                 logger.exception("多 Agent 预路由失败，回退旧 ReAct")
@@ -777,7 +814,11 @@ class BiddingAgent(ReActMixin, GenerationMixin, ToolDefenseMixin):
                 current = meta.get("multi_agent")
                 if isinstance(current, dict):
                     current.update(
-                        activated=False, decision="declined_error", route=[]
+                        activated=False,
+                        decision="declined_error",
+                        route=[],
+                        router="rules",
+                        router_reason="prepare_exception",
                     )
 
             if multi_run is not None:
@@ -1229,9 +1270,32 @@ class BiddingAgent(ReActMixin, GenerationMixin, ToolDefenseMixin):
         if isinstance(ma, dict):
             ma = dict(ma)
             orch = meta.get("orchestration")
+            if isinstance(orch, dict):
+                budget = meta.get("_llm_budget")
+                if budget is not None:
+                    try:
+                        orch.update(budget.snapshot())
+                    except Exception:  # noqa: BLE001 - 观测不能影响 done
+                        pass
             if ma.get("activated") and isinstance(orch, dict):
                 ma["fallback"] = str(orch.get("fallback") or "none")
                 ma["partial"] = bool(orch.get("partial"))
+                ma["deadline_exceeded"] = bool(orch.get("deadline_exceeded"))
+                ma["router"] = str(
+                    orch.get("router") or ma.get("router") or "rules"
+                )
+                ma["router_reason"] = str(
+                    orch.get("router_reason") or ma.get("router_reason") or ""
+                )
+                for key in (
+                    "llm_calls_used",
+                    "llm_call_limit",
+                    "llm_calls_denied",
+                    "budget_exhausted",
+                    "timeout_reason",
+                ):
+                    if key in orch:
+                        ma[key] = orch[key]
             done["multi_agent"] = ma
 
         # 全流量进程内指标只在这里记一次；clarify 也记，但不计入质量分母。
@@ -1356,11 +1420,17 @@ class BiddingAgent(ReActMixin, GenerationMixin, ToolDefenseMixin):
         prompt = self._REPAIR_PROMPT.format(
             issues=issues, tool_text=tool_text[:6000], answer=answer
         )
+        from src.agent.llm_budget import llm_slot, try_acquire_llm_call
+
+        if not try_acquire_llm_call(meta):
+            # 修复是增益项；预算耗尽时保留原答案与核对结论，不超限。
+            return
         try:
-            repaired = client.chat_raw([
-                {"role": "system", "content": "你是严谨的招投标法规问答校对员。"},
-                {"role": "user", "content": prompt},
-            ])
+            with llm_slot(meta):
+                repaired = client.chat_raw([
+                    {"role": "system", "content": "你是严谨的招投标法规问答校对员。"},
+                    {"role": "user", "content": prompt},
+                ])
         except Exception:
             logger.exception("修复轮调用失败（保留原答案）")
             return

@@ -11,6 +11,12 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING
 
 from src.agent.constants import MAX_TOKENS_DEEP, STREAM_FLUSH_CHARS
+from src.agent.llm_budget import (
+    cancel_requested,
+    deadline_passed,
+    llm_slot,
+    try_acquire_llm_call,
+)
 from src.agent.prompts import DEEP_THINKING_INJECT, SYSTEM_PROMPT
 from src.agent.utils import _pace_stream_chunks
 from src.agent.verification import build_grounding_note
@@ -18,6 +24,24 @@ from src.agent.verification import build_grounding_note
 logger = logging.getLogger(__name__)
 
 RAG_TOP_K = 5  # RAG 降级路径的检索条数，与 /api/ask 默认值保持一致
+
+
+def _iter_with_budget(stream, meta: dict):
+    """在每次读取底层流时持有多 Agent LLM 槽，并在截止/取消时停止。
+
+    旧 ReAct 的 meta 没有这些键，helper 是 no-op，行为与原先完全一致。
+    """
+    iterator = iter(stream)
+    while True:
+        if cancel_requested(meta) or deadline_passed(meta):
+            meta["_generation_deadline_exceeded"] = True
+            return
+        with llm_slot(meta):
+            try:
+                item = next(iterator)
+            except StopIteration:
+                return
+        yield item
 
 
 class GenerationMixin:
@@ -67,6 +91,10 @@ class GenerationMixin:
         工具调用格式才切帧下发；一旦确认泄漏，立即发 reset 清空已流正文，
         走兜底执行后重新生成。
         """
+        # 多 Agent 请求级预算：没有预算时（旧 ReAct）直接放行。
+        if not try_acquire_llm_call(meta):
+            meta["_llm_budget_exhausted"] = True
+            return
         yield "status", "正在生成回答..."
         t0 = time.monotonic()
 
@@ -167,7 +195,7 @@ class GenerationMixin:
             return kind, chunk
 
         pending = ""
-        for _item in stream:
+        for _item in _iter_with_budget(stream, meta):
             kind, chunk = _normalize(_item)
             if kind == "thinking":
                 yield "thinking", chunk or ""
@@ -195,7 +223,11 @@ class GenerationMixin:
                     yield "token", small
                 pending = ""
 
-        if pending:
+        if meta.get("_generation_deadline_exceeded"):
+            meta["_multi_agent_deadline_exceeded"] = True
+        # 截止/取消时不再 flush 缓冲：避免把半截正文当成完整回答下发，
+        # 也避免"首 token 前超时"被误判为已产出可见内容。
+        if pending and not meta.get("_generation_deadline_exceeded"):
             if self._parse_tool_text(pending):
                 # 流结束时缓冲里仍是完整调用：同样 reset + 兜底
                 logger.warning("流结束时检出工具调用文本泄漏，触发 reset 与兜底执行")
@@ -225,11 +257,16 @@ class GenerationMixin:
                 ),
             },
         ]
-        try:
-            answer = client.chat_raw(retry_messages)
-        except Exception as exc:
-            logger.warning("兜底重生成失败: %s", exc)
-            answer = ""
+        if not try_acquire_llm_call(meta):
+            meta["_llm_budget_exhausted"] = True
+            answer = result_text
+        else:
+            try:
+                with llm_slot(meta):
+                    answer = client.chat_raw(retry_messages)
+            except Exception as exc:
+                logger.warning("兜底重生成失败: %s", exc)
+                answer = ""
         if self._detect_tool_text(answer or ""):
             answer = ""
         answer = (answer or "").strip() or "抱歉，本次回答生成失败，请重试。"

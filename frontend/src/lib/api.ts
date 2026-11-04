@@ -115,8 +115,19 @@ export interface MultiAgentRunInfo {
   activated: boolean
   decision?: string
   route?: string[]
+  /** 实际使用的路由：rules / llm / llm_fallback（llm_fallback 表示尝试过 LLM）。 */
+  router?: string
+  router_reason?: string
+  router_attempted?: boolean
+  router_elapsed_ms?: number
   fallback?: string
   partial?: boolean
+  deadline_exceeded?: boolean
+  timeout_reason?: string
+  llm_calls_used?: number
+  llm_call_limit?: number
+  llm_calls_denied?: number
+  budget_exhausted?: boolean
 }
 
 /** done 帧（后端契约，type 键见开发文档 §6.4） */
