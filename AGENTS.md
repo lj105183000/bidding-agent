@@ -112,7 +112,7 @@ src/config.py       Settings dataclass，__post_init__ 校验必需项，缺失�
 - `AGENT_MULTI_AGENT=off|auto|on`，**默认 off**；off 时完全走旧 ReAct，行为不变。`auto` 只对复合/多意图问题走图；`on` 供评测/A-B。依赖缺失自动回落 off。
 - specialist 复用 `react_loop._run_tool_loop`（已从 `_chat_stream_tools` 拆出），**不调用** `_generate_final`；只有 synthesizer 产 token。首 token 前失败/无有效结果自动回退旧 ReAct。
 - 新增 done 字段 `orchestration` / `agent_trace` / `agent_timings`（additive）；多 Agent 下 `tool_name` 仍是 primary specialist 的最后一个成功工具（单字符串）。
-- 评测线 `agent_multi` 已落地：`eval/test_cases_multi.json`（20 条，联网类在 off 口径跳过）+ 指标注册 + `eval-gate` 接入；`agent` 线强制 off，`agent_multi` 强制 on。首轮 18 题基线已建立（P95 17s、引用 100%、核对 100%，`AGENT_VERIFY_REPAIR=1` 口径）；阈值待 3–5 次观测后标定。
+- 评测线 `agent_multi` 已落地：`eval/test_cases_multi.json`（24 条，web off 实跑 22 条、20 条进入核对分母）+ 指标注册 + `eval-gate` 接入；`agent` 线强制 off，`agent_multi` 强制 on。3 次取中位基线（P95 14s、引用/核对 100%，`AGENT_VERIFY_REPAIR=1` 口径）后已标定观测阈值。
 
 ## 不可破坏的契约（红线）
 

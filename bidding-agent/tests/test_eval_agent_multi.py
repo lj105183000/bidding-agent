@@ -40,6 +40,40 @@ def test_agent_multi_metrics_registered():
     assert required <= names
 
 
+def test_agent_multi_thresholds_calibrated():
+    """首轮标定后的门槛必须固化，避免后续改动把红线悄悄调松或调没。"""
+    expected = {
+        "agent_multi.routing_accuracy": 0.90,
+        "agent_multi.specialist_tool_accuracy": 0.90,
+        "agent_multi.synthesis_citation_rate": 0.90,
+        "agent_multi.latency_p95": 60000.0,
+        "agent_multi.partial_rate": 0.10,
+        "agent_multi.fallback_rate": 0.10,
+        "agent_multi.llm_calls_mean": 5.0,
+        "agent_multi.routing_llm_rate": 0.15,
+        "agent_multi.hit_specialist_cap_rate": 0.20,
+        "agent_multi.verification_critical_ok_rate": 0.95,
+        "agent_multi.verification_ok_rate": 0.90,
+        "agent_multi.false_unavailable_rate": 0.0,
+    }
+    for name, threshold in expected.items():
+        assert R.METRIC_SPECS[name].threshold == threshold, name
+
+    # 首轮标定只有 3 次实测；报告会据此提示"门槛仍是临时的"。
+    calibrated = (
+        "agent_multi.routing_accuracy",
+        "agent_multi.specialist_tool_accuracy",
+        "agent_multi.synthesis_citation_rate",
+        "agent_multi.partial_rate",
+        "agent_multi.fallback_rate",
+        "agent_multi.llm_calls_mean",
+        "agent_multi.routing_llm_rate",
+        "agent_multi.hit_specialist_cap_rate",
+    )
+    for name in calibrated:
+        assert R.METRIC_SPECS[name].calibrated_on_runs == 3, name
+
+
 def test_agent_multi_dataset_registered_and_cases_valid():
     info = DR.DATASETS["agent_multi"]
     assert info.path == EVAL_DIR / "test_cases_multi.json"
