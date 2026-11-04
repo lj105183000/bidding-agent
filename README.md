@@ -16,6 +16,24 @@
 
 面向招投标采购场景的智能问答系统：以 **RAG 混合检索（Qdrant）+ 知识图谱（Neo4j）+ 结构化数据库（PostgreSQL）+ 联网搜索（Tavily/Exa）** 四路数据源为底座，由 **ReAct 多轮工具循环**或**可选 LangGraph 多 Agent 编排（Phase 1a/1b）**回答问题，前端 **React 18 + Vite 5** 流式渲染（SSE）。
 
+## 产品演示
+
+> 60 秒 · 1080p · 中文男声旁白。GitHub 内嵌播放器默认静音，点击播放后请打开音量；视频与截图中的业务数字为演示数据，不代表实时生产数据。
+
+https://github.com/user-attachments/assets/b5fb784c-f1fe-40e5-a995-503c62d19567
+
+[下载 MP4](docs/assets/demo/demo-1080p.mp4) · [截图与生成说明](docs/assets/demo/README.md)
+
+### 产品截图
+
+| 工作台 | 智能问答 |
+|:---:|:---:|
+| ![工作台](docs/assets/demo/screenshots/01-dashboard.png) | ![智能问答](docs/assets/demo/screenshots/02-chat.png) |
+| **图谱可视化** | **集采分析** |
+| ![图谱可视化](docs/assets/demo/screenshots/05b-graph-closeup.png) | ![集采分析](docs/assets/demo/screenshots/03-analysis-overview.png) |
+| **标讯智能提取** | **评估看板** |
+| ![标讯智能提取](docs/assets/demo/screenshots/06-extract.png) | ![评估看板](docs/assets/demo/screenshots/07b-eval-online.png) |
+
 ## 功能概览
 
 **Chat 智能问答**
