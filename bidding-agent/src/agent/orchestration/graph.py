@@ -10,6 +10,8 @@ import logging
 import threading
 import time
 
+from src.agent.constants import MULTI_AGENT_SYNTHESIS_MAX_CHARS
+from src.agent.llm_budget import cancel_requested, deadline_passed
 from src.agent.orchestration.merge import merge_results
 from src.agent.orchestration.prompts import SYNTHESIS_SYSTEM
 from src.agent.orchestration.router import AgentTask
@@ -47,6 +49,9 @@ def build_multi_agent_graph(agent):
 
     def route_node(state: MultiAgentState) -> dict:
         meta = state.get("runtime_meta") or {}
+        if meta.get("_multi_agent_abandoned") or deadline_passed(meta) or cancel_requested(meta):
+            _legacy(meta)
+            return {}
         t0 = time.monotonic()
         agent._mark_phase(meta, "问题路由", t0)
         meta["_dispatch_t0"] = time.monotonic()
@@ -54,6 +59,10 @@ def build_multi_agent_graph(agent):
         return {}
 
     def route_edge(state: MultiAgentState):
+        meta = state.get("runtime_meta") or {}
+        if meta.get("_multi_agent_abandoned") or deadline_passed(meta) or cancel_requested(meta):
+            _legacy(meta)
+            return "legacy"
         route = state.get("route") or []
         if not route:
             return "legacy"
@@ -73,6 +82,9 @@ def build_multi_agent_graph(agent):
     def specialist_node(state: MultiAgentState) -> dict:
         task = state.get("task") or {}
         meta = state.get("runtime_meta") or {}
+        if meta.get("_multi_agent_abandoned") or deadline_passed(meta) or cancel_requested(meta):
+            meta["_multi_agent_deadline_exceeded"] = True
+            return {"specialist_results": []}
         if not task:
             return {
                 "specialist_results": [],
@@ -91,11 +103,17 @@ def build_multi_agent_graph(agent):
             web_enabled=bool(state.get("web_enabled")),
             session_id=str(state.get("session_id") or ""),
             trace_recorder=state.get("trace_recorder"),
+            budget=meta.get("_llm_budget"),
+            deadline=meta.get("_multi_agent_deadline"),
+            cancel_event=meta.get("_multi_agent_cancel"),
+            tool_semaphore=meta.get("_tool_semaphore"),
         )
         return {"specialist_results": [result]}
 
     def merge_node(state: MultiAgentState) -> dict:
         meta = state.get("runtime_meta") or {}
+        if meta.get("_multi_agent_abandoned"):
+            return {}
         if meta.get("_multi_merged"):
             return {}
         meta["_multi_merged"] = True
@@ -115,18 +133,23 @@ def build_multi_agent_graph(agent):
         meta["tool_call_names"] = list(merged.get("tool_names") or [])
         meta["agent_trace"] = list(merged.get("agent_trace") or [])
         meta["agent_timings"] = list(merged.get("agent_timings") or [])
+        deadline_exceeded = bool(meta.get("_multi_agent_deadline_exceeded"))
         meta["orchestration"] = {
             "enabled": True,
             "mode": str(meta.get("_multi_agent_mode") or ""),
-            "router": "rules",
+            "router": str(meta.get("_multi_agent_router") or "rules"),
+            "router_reason": str(meta.get("_multi_agent_router_reason") or ""),
             "route": [
                 str((task or {}).get("agent") or "")
                 for task in (state.get("route") or [])
             ],
-            "partial": bool(merged.get("partial")),
-            "deadline_exceeded": False,
+            "partial": bool(merged.get("partial")) or deadline_exceeded,
+            "deadline_exceeded": deadline_exceeded,
             "fallback": "none",
         }
+        budget = meta.get("_llm_budget")
+        if budget is not None:
+            meta["orchestration"].update(budget.snapshot())
         return {"merged": merged, "partial": bool(merged.get("partial"))}
 
     def synthesize_node(state: MultiAgentState) -> dict:
@@ -155,13 +178,19 @@ def build_multi_agent_graph(agent):
                 f"【{result.get('agent')}】\n{result.get('answer')}"
                 + (f"\n来源：{', '.join(urls)}" if urls else "")
             )
+        expert_text = "\n\n".join(blocks)
+        if len(expert_text) > MULTI_AGENT_SYNTHESIS_MAX_CHARS:
+            expert_text = (
+                expert_text[:MULTI_AGENT_SYNTHESIS_MAX_CHARS]
+                + "\n…[专家发现过长，已截断]"
+            )
         messages = [
             {"role": "system", "content": SYNTHESIS_SYSTEM},
             {
                 "role": "user",
                 "content": (
                     f"用户问题：{state.get('question') or ''}\n\n"
-                    "专家发现：\n\n" + "\n\n".join(blocks) + "\n\n"
+                    "专家发现：\n\n" + expert_text + "\n\n"
                     "请综合以上发现给出最终回答。"
                 ),
             },
@@ -176,6 +205,13 @@ def build_multi_agent_graph(agent):
         deep = bool(state.get("deep_thinking_enabled"))
         if deep:
             client = agent._thinking_model(client, str(state.get("provider") or ""))
+
+        if meta.get("_multi_agent_abandoned"):
+            return {}
+        if deadline_passed(meta) or cancel_requested(meta):
+            meta["_multi_agent_deadline_exceeded"] = True
+            _legacy(meta)
+            return {"fallback": "legacy"}
 
         answer_parts: list[str] = []
         try:
@@ -202,12 +238,40 @@ def build_multi_agent_graph(agent):
             _emit({"type": "status", "content": "正在生成回答..."})
             _emit({"type": "token", "content": fallback})
             meta["streamed"] = True
-            meta["answer_text"] = fallback
+            meta["_multi_agent_answer"] = fallback
             meta.setdefault("orchestration", {})["fallback"] = "fragment"
             return {"answer": fallback}
 
+        if meta.get("_generation_deadline_exceeded"):
+            meta["_multi_agent_deadline_exceeded"] = True
+            orch = meta.setdefault("orchestration", {})
+            orch["deadline_exceeded"] = True
+            orch["partial"] = True
+            if not answer_parts:
+                _legacy(meta)
+                return {"fallback": "legacy"}
+
+        # 预算耗尽/底层流为空时 `_generate_final` 可能正常返回但零 token。
+        # 这时不能产出空答案：优先回放第一个专家结论（fragment），否则回退旧 ReAct。
+        if not answer_parts:
+            fallback = next(
+                (str(r.get("answer") or "") for r in findings if r.get("answer")),
+                "",
+            )
+            if fallback:
+                _emit({"type": "status", "content": "正在生成回答..."})
+                _emit({"type": "token", "content": fallback})
+                meta["streamed"] = True
+                meta["_multi_agent_answer"] = fallback
+                meta.setdefault("orchestration", {})["fallback"] = "fragment"
+                return {"answer": fallback}
+            _legacy(meta)
+            return {"fallback": "legacy"}
+
         answer = "".join(answer_parts)
-        meta["answer_text"] = answer
+        # 图可能在线程里跑；不要写 core 正在累积的 answer_text（会竞争）。
+        # 无 custom-stream 的兜底路径从这里取整段答案。
+        meta["_multi_agent_answer"] = answer
         return {"answer": answer}
 
     builder = StateGraph(MultiAgentState)

@@ -133,6 +133,11 @@ def test_multi_agent_graph_end_to_end(monkeypatch):
     assert ma["route"] == ["data", "retrieval"]
     assert ma["fallback"] == "none"
     assert ma["partial"] is False
+    assert ma["router"] == "rules"
+    assert ma["deadline_exceeded"] is False
+    assert done["orchestration"]["router"] == "rules"
+    assert done["orchestration"]["llm_calls_used"] >= 1
+    assert done["orchestration"]["budget_exhausted"] is False
     assert [item["agent"] for item in done["agent_trace"]] == ["data", "retrieval"]
     assert all(item["status"] == "ok" for item in done["agent_trace"])
     phases = [item[0] for item in done["phase_times"]]

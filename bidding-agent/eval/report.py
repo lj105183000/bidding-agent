@@ -648,8 +648,9 @@ METRIC_SPECS: dict[str, MetricSpec] = {
         unit="ratio",
         suite="agent_multi",
         rationale=(
-            "非 rules 路由的题占比；Phase 1b 默认规则路由，首轮标定 ≤0.15。"
-            "该指标用于后续开启 AGENT_MULTI_ROUTER 时监控成本。"
+            "非 rules 路由的题占比（含 llm_fallback 尝试）；Phase 1b 默认规则路由，"
+            "首轮标定 ≤0.15。开启 AGENT_MULTI_ROUTER=auto/llm 时该指标会上升，"
+            "用于监控额外 LLM 成本。"
         ),
     ),
     "agent_multi.hit_specialist_cap_rate": MetricSpec(
