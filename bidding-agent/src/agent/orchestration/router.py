@@ -138,7 +138,15 @@ def should_use_multi_agent(
     mode: str,
     tasks: list[AgentTask],
 ) -> bool:
-    """决定是否真的走图；`auto` 只对复合/多意图问题启用。"""
+    """决定是否真的走图；`auto` 只对**多专家**问题启用。
+
+    ★ 为什么 auto 不再看 `is_compound_question`
+    ----------------------------------------
+    实测 #5「公开招标和邀请招标有什么区别？」被判为复合，但路由只有
+    `retrieval` 一个专家：走图没有并行收益，反而多一次路由/综合生成，
+    A/B 里 latency 8s → 33.8s（含一次偶发 fallback），质量无提升。
+    单专家题交给旧 ReAct 更稳、更便宜；`on` 仍无条件走图（评测/A-B 用）。
+    """
     if mode not in ("auto", "on") or not tasks:
         return False
     # 过短/疑似需要澄清的问题交给旧 ReAct，沿用现有 clarify 逻辑。
@@ -146,14 +154,8 @@ def should_use_multi_agent(
         return False
     if mode == "on":
         return True
-    if len(tasks) >= 2:
-        return True
-    try:
-        from src.agent.planning import is_compound_question
-
-        return bool(is_compound_question(str(question or "")))
-    except Exception:  # noqa: BLE001
-        return False
+    # auto：只有至少两个 specialist 才值得并行；单专家一律回退旧路径。
+    return len(tasks) >= 2
 
 
 __all__ = [

@@ -109,7 +109,7 @@ src/config.py       Settings dataclass，__post_init__ 校验必需项，缺失�
 ### 多 Agent 编排（Phase 1）
 
 - `src/agent/orchestration/`：LangGraph（0.3.x）图 → `route`（确定性规则）→ `specialists`（retrieval/data/web/compliance 并行）→ `merge` → `synthesize`。
-- `AGENT_MULTI_AGENT=off|auto|on`，**默认 off**；off 时完全走旧 ReAct，行为不变。`auto` 只对复合/多意图问题走图；`on` 供评测/A-B。依赖缺失自动回落 off。
+- `AGENT_MULTI_AGENT=off|auto|on`，**默认 off**；off 时完全走旧 ReAct，行为不变。`auto` 只在路由出 **≥2 个 specialist** 时走图（单专家题回退旧 ReAct）；`on` 供评测/A-B。依赖缺失自动回落 off。
 - specialist 复用 `react_loop._run_tool_loop`（已从 `_chat_stream_tools` 拆出），**不调用** `_generate_final`；只有 synthesizer 产 token。首 token 前失败/无有效结果自动回退旧 ReAct。
 - 新增 done 字段 `orchestration` / `agent_trace` / `agent_timings`（additive）；多 Agent 下 `tool_name` 仍是 primary specialist 的最后一个成功工具（单字符串）。
 - 评测线 `agent_multi` 已落地：`eval/test_cases_multi.json`（24 条，web off 实跑 22 条、20 条进入核对分母）+ 指标注册 + `eval-gate` 接入；`agent` 线强制 off，`agent_multi` 强制 on。3 次取中位基线（P95 14s、引用/核对 100%，`AGENT_VERIFY_REPAIR=1` 口径）后已标定观测阈值。
