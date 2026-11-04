@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 开发文档
+    url: https://github.com/lj105183000/bidding-agent/tree/main/bidding-agent/docs
+    about: 环境、API 契约、评测、部署与排障优先查这里。
+  - name: 安全/密钥问题
+    url: https://github.com/lj105183000/bidding-agent/security
+    about: 不要在公开 issue 中粘贴密钥或真实业务数据。

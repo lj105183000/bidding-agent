@@ -1,5 +1,7 @@
 # 招投标采购 Agent（招投标智能问答系统）
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 面向招投标采购场景的智能问答系统：以 **RAG 混合检索（Qdrant）+ 知识图谱（Neo4j）+ 结构化数据库（PostgreSQL）+ 联网搜索（Tavily/Exa）** 四路数据源为底座，由 **ReAct 多轮工具循环**或**可选 LangGraph 多 Agent 编排（Phase 1a/1b）**回答问题，前端 **React 18 + Vite 5** 流式渲染（SSE）。
 
 ## 功能概览
@@ -221,7 +223,12 @@ curl -s "http://127.0.0.1:8001/api/eval/online?limit=2000" | jq '.multi_agent'
 | `bidding-agent/docs/组件工作机制.md` | 20+ 组件的 Mermaid 机制图解 |
 | `bidding-agent/docs/并行开发协作.md` | 多 Agent 并行开发：所有权/契约/共享资源/合并流程 |
 | `bidding-agent/docs/增加Agent功能.md` | 二期功能清单（历史参考；多 Agent 等已落地） |
+| `CONTRIBUTING.md` | 贡献流程：环境、分支/PR、测试、代码风格、评测与安全约定 |
 | `CLAUDE.md` / `AGENTS.md` | AI 编码助手工作指引（架构约定、契约红线、测试约定） |
+
+## License
+
+本项目使用 [MIT License](LICENSE)。
 
 ## Git 协作
 
